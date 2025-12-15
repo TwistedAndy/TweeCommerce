@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use App\Entities\Entity;
+use App\Entities\EntityInterface;
 use CodeIgniter\Model;
 use CodeIgniter\DataCaster\DataCaster;
 use CodeIgniter\Database\ConnectionInterface;
@@ -52,7 +53,7 @@ class EntityModel extends Model
      */
     public function getIdValue($row): int|string|null
     {
-        if ($row instanceof Entity) {
+        if ($row instanceof EntityInterface) {
             $attributes = $row->getAttributes();
             $id = $attributes[$this->primaryKey] ?? null;
         } elseif (is_array($row)) {
@@ -143,11 +144,11 @@ class EntityModel extends Model
             foreach ($rows as $id => $row) {
                 static::$entityCache[$id] = $row;
             }
-        } elseif ($first instanceof Entity::class) {
+        } elseif ($first instanceof EntityInterface) {
             foreach ($rows as $id => $row) {
                 static::$entityCache[$id] = $row->getAttributes();
             }
-        } elseif ($first instanceof \CodeIgniter\Entity\Entity::class) {
+        } elseif ($first instanceof \CodeIgniter\Entity\Entity) {
             foreach ($rows as $id => $row) {
                 static::$entityCache[$id] = $row->toRawArray(false, false);
             }

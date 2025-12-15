@@ -1,0 +1,336 @@
+<?php
+
+namespace App\Core;
+
+use App\Exceptions\ContainerException;
+use App\Exceptions\NotFoundException;
+use Psr\Container\ContainerInterface;
+use ReflectionNamedType;
+use ReflectionException;
+use ReflectionClass;
+
+class App implements ContainerInterface
+{
+    /**
+     * The Singleton instance of the Container itself.
+     */
+    protected static ?App $instance = null;
+
+    /**
+     * Cache of constructor parameters for classes to avoid slow Reflection.
+     * Structure: [ 'ClassName' => [ ['name'=>'id', 'type'=>null, ...], ... ] ]
+     */
+    protected static array $parameterCache = [];
+
+    /**
+     * Cache of resolved singleton objects.
+     */
+    protected array $instances = [];
+
+    /**
+     * Registered bindings (Interface => Implementation).
+     */
+    protected array $bindings = [];
+
+    /**
+     * Registered singletons.
+     */
+    protected array $singletons = [];
+
+    /**
+     * Use the container as a singleton
+     */
+    private function __construct()
+    {
+        $config = config(\Config\App::class);
+        $this->bindings = $config->bindings ?? [];
+        $this->singletons = array_fill_keys($config->singletons ?? [], true);
+    }
+
+    /**
+     * Get the global container instance.
+     */
+    public static function getInstance(): App
+    {
+        if (static::$instance === null) {
+            static::$instance = new static();
+        }
+        return static::$instance;
+    }
+
+    /**
+     * PSR-11: Finds an entry of the container by its identifier and returns it.
+     *
+     * @param string $id Identifier of the entry to look for.
+     *
+     * @return mixed
+     *
+     * @throws NotFoundException  No entry was found for **this** identifier.
+     * @throws ContainerException Error while retrieving the entry.
+     */
+    public function get(string $id): mixed
+    {
+        if (!$this->has($id)) {
+            throw new NotFoundException("No entry or class found for identifier: '$id'");
+        }
+
+        try {
+            return $this->make($id);
+        } catch (\Throwable $e) {
+            throw new ContainerException("Error while resolving entry '$id': " . $e->getMessage(), 0, $e);
+        }
+    }
+
+    /**
+     * PSR-11: Check if the container can return an entry for the given identifier
+     *
+     * @param string $id
+     *
+     * @return bool
+     */
+    public function has(string $id): bool
+    {
+        // Check Singletons/Cache
+        if (isset($this->instances[$id])) {
+            return true;
+        }
+
+        // Check Bindings (Aliases/Interfaces)
+        if (isset($this->bindings[$id])) {
+            return true;
+        }
+
+        // Check Class Existence (Autowiring)
+        if (class_exists($id)) {
+            return true;
+        }
+
+        // Check Core Service Fallback
+        if (class_exists(\Config\Services::class) and method_exists(\Config\Services::class, $id)) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Register a binding dynamically (Used by Plugins).
+     *
+     * @param string $abstract          Interface or Alias (e.g. EntityInterface::class)
+     * @param string|callable $concrete Concrete Class (e.g. Entity::class)
+     *
+     * @param bool $shared              Whether to treat as Singleton
+     */
+    public function bind(string $abstract, string|callable $concrete, bool $shared = false): void
+    {
+        $this->bindings[$abstract] = $concrete;
+
+        if ($shared) {
+            $this->singletons[$abstract] = true;
+            if (is_string($concrete)) {
+                $this->singletons[$concrete] = true;
+            }
+        }
+    }
+
+    /**
+     * Register a shared binding (Singleton).
+     */
+    public function singleton(string $abstract, string|callable $concrete): void
+    {
+        $this->bind($abstract, $concrete, true);
+    }
+
+    /**
+     * Resolve a dependency.
+     */
+    public function make(string $abstract, array $parameters = [])
+    {
+        /**
+         * Check the cache for the abstract class first
+         */
+        if (isset($this->instances[$abstract])) {
+            return $this->instances[$abstract];
+        }
+
+        /**
+         * Resolve bindings Alias/Interface -> Concrete Class
+         */
+        $concrete = $abstract;
+        $chain = [];
+
+        while (is_string($concrete) and isset($this->bindings[$concrete])) {
+            if (isset($chain[$concrete])) {
+                throw new ContainerException("Circular binding detected: " . implode(' -> ', array_keys($chain)) . " -> $concrete");
+            }
+            $chain[$concrete] = true;
+            $concrete = $this->bindings[$concrete];
+        }
+
+        /**
+         * Fill the instance cache for singletons
+         */
+        if (is_string($concrete) and isset($this->instances[$concrete])) {
+            $this->instances[$abstract] = $this->instances[$concrete];
+            return $this->instances[$concrete];
+        }
+
+        $object = $this->build($concrete, $parameters);
+
+        if (isset($this->singletons[$abstract]) or (is_string($concrete) and isset($this->singletons[$concrete]))) {
+            $this->instances[$abstract] = $object;
+            if (is_string($concrete)) {
+                $this->instances[$concrete] = $object;
+            }
+        }
+
+        return $object;
+    }
+
+    /**
+     * Reflection-based auto-wiring
+     */
+    protected function build(string|callable $concrete, array $parameters): object
+    {
+        if (is_callable($concrete)) {
+            return $concrete($this, $parameters);
+        }
+
+        if (!class_exists($concrete)) {
+
+            /**
+             * If it's not a class, it might be a Service alias or a dynamic service
+             */
+            $service = service($concrete);
+
+            if (is_object($service)) {
+                return $service;
+            }
+
+            if (interface_exists($concrete)) {
+                throw new NotFoundException("Service Resolution Failed: Interface '$concrete' is not bound to any implementation.");
+            } else {
+                throw new NotFoundException("Service Resolution Failed: Class '$concrete' not found.");
+            }
+
+        }
+
+        if (!isset(static::$parameterCache[$concrete])) {
+            $this->cacheParameters($concrete);
+        }
+
+        $cachedParams = static::$parameterCache[$concrete];
+
+        /**
+         * If the cache says there are no constructor arguments, we can
+         * skip Reflection entirely and just instantiate the class directly
+         */
+        if (empty($cachedParams)) {
+            return new $concrete();
+        }
+
+        /**
+         * Resolve dependencies using the cache
+         */
+        $instances = $this->resolveDependencies($concrete, $cachedParams, $parameters);
+
+        /**
+         * We finally use Reflection here because newInstanceArgs is cleaner for
+         * dynamic args, but we successfully skipped the heavy "analysis" phase above
+         */
+        try {
+            return (new ReflectionClass($concrete))->newInstanceArgs($instances);
+        } catch (ReflectionException $e) {
+            throw new ContainerException("Container failed to instantiate $concrete: " . $e->getMessage(), 0, $e);
+        }
+    }
+
+    /**
+     * Analyze the class once and cache the parameter definitions.
+     */
+    protected function cacheParameters(string $className): void
+    {
+        try {
+            $reflector = new \ReflectionClass($className);
+            if (!$reflector->isInstantiable()) {
+                throw new ContainerException("Service Resolution Failed: Class '$className' is not instantiable.");
+            }
+        } catch (ReflectionException $e) {
+            throw new ContainerException("Container failed to instantiate '$className': " . $e->getMessage(), 0, $e);
+        }
+
+        $constructor = $reflector->getConstructor();
+
+        if ($constructor === null) {
+            static::$parameterCache[$className] = [];
+            return;
+        }
+
+        $params = [];
+
+        foreach ($constructor->getParameters() as $param) {
+            $type = $param->getType();
+            $params[] = [
+                'name'        => $param->getName(),
+                'type_name'   => ($type instanceof ReflectionNamedType && !$type->isBuiltin()) ? $type->getName() : null,
+                'is_optional' => $param->isDefaultValueAvailable(),
+                'default'     => $param->isDefaultValueAvailable() ? $param->getDefaultValue() : null,
+                'nullable'    => $param->allowsNull(),
+                'variadic'    => $param->isVariadic(),
+            ];
+        }
+
+        static::$parameterCache[$className] = $params;
+    }
+
+    /**
+     * Resolve class dependencies
+     *
+     * @param array $dependencies
+     * @param array $parameters
+     *
+     * @return array
+     */
+    protected function resolveDependencies(string $className, array $dependencies, array $parameters): array
+    {
+        $results = [];
+
+        foreach ($dependencies as $dep) {
+
+            $name = $dep['name'];
+
+            // Named Parameter Override
+            if (array_key_exists($name, $parameters)) {
+                $results[] = $parameters[$name];
+                continue;
+            }
+
+            // Class Dependency (Autowiring)
+            if ($dep['type_name'] !== null) {
+                try {
+                    $results[] = $this->make($dep['type_name']);
+                } catch (ContainerException $e) {
+                    if ($dep['nullable']) {
+                        $results[] = null;
+                    } else {
+                        throw $e;
+                    }
+                }
+                continue;
+            }
+
+            // Primitives / Optionals
+            if ($dep['is_optional']) {
+                $results[] = $dep['default'];
+            } elseif ($dep['variadic']) {
+                // Variadics are optional by definition
+                $results[] = [];
+            } else {
+                // We don't have the class name handy in the array, but we can usually infer context
+                throw new ContainerException("Unresolvable dependency: Parameter '\${$name}' in class '{$className}' is missing a value.");
+            }
+        }
+
+        return $results;
+    }
+}

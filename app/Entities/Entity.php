@@ -26,7 +26,7 @@ class Entity implements EntityInterface, JsonSerializable
     public function __construct(?array $data = null)
     {
         if (is_array($data)) {
-            $this->setAttributes($data);
+            $this->attributes = $data;
         }
     }
 
