@@ -28,6 +28,12 @@ class App implements ContainerInterface
     protected array $instances = [];
 
     /**
+     * Contextual bindings map.
+     * [ 'ParentClass' => [ 'NeedsInterface' => 'GivesConcrete' ] ]
+     */
+    protected array $contextual = [];
+
+    /**
      * Registered bindings (Interface => Implementation).
      */
     protected array $bindings = [];
@@ -139,6 +145,21 @@ class App implements ContainerInterface
     public function singleton(string $abstract, string|callable $concrete): void
     {
         $this->bind($abstract, $concrete, true);
+    }
+
+    /**
+     * Define a contextual binding: when class {$when} asks for {$needs}, give it {$give}.
+     *
+     * @param string $when          The Class Name that needs the dependency (Parent)
+     * @param string $needs         The Interface/Class dependency needed
+     * @param string|callable $give The Concrete implementation to provide
+     */
+    public function bindContextual(string $when, string $needs, string|callable $give): void
+    {
+        if (!isset($this->contextual[$when])) {
+            $this->contextual[$when] = [];
+        }
+        $this->contextual[$when][$needs] = $give;
     }
 
     /**
@@ -298,6 +319,7 @@ class App implements ContainerInterface
         foreach ($dependencies as $dep) {
 
             $name = $dep['name'];
+            $type = $dep['type_name'];
 
             // Named Parameter Override
             if (array_key_exists($name, $parameters)) {
@@ -306,7 +328,14 @@ class App implements ContainerInterface
             }
 
             // Class Dependency (Autowiring)
-            if ($dep['type_name'] !== null) {
+            if ($type !== null) {
+                if (isset($this->contextual[$className]) and isset($this->contextual[$className][$type])) {
+                    $concrete = $this->contextual[$className][$type];
+
+                    // Use build() for Closures, make() for Strings
+                    $results[] = is_string($concrete) ? $this->make($concrete) : $this->build($concrete, $parameters);
+                    continue;
+                }
                 try {
                     $results[] = $this->make($dep['type_name']);
                 } catch (ContainerException $e) {
