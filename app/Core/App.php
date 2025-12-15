@@ -5,6 +5,7 @@ namespace App\Core;
 use App\Exceptions\ContainerException;
 use App\Exceptions\NotFoundException;
 use Psr\Container\ContainerInterface;
+use ReflectionFunctionAbstract;
 use ReflectionNamedType;
 use ReflectionException;
 use ReflectionClass;
@@ -48,7 +49,7 @@ class App implements ContainerInterface
      */
     private function __construct()
     {
-        $config = config(\Config\App::class);
+        $config = config(\Config\Container::class);
         $this->bindings = $config->bindings ?? [];
         $this->singletons = array_fill_keys($config->singletons ?? [], true);
     }
@@ -267,6 +268,60 @@ class App implements ContainerInterface
     }
 
     /**
+     * Call the given callback/method and inject its dependencies.
+     * Matches Laravel's: $container->call([$object, 'method'], ['param' => 123]);
+     *
+     * @param callable|string|array $callback
+     * @param array $parameters          Named parameters to override
+     * @param string|null $defaultMethod Method to call if $callback is just a class name
+     *
+     * @return mixed
+     */
+    public function call(mixed $callback, array $parameters = [], ?string $defaultMethod = null): mixed
+    {
+        // Normalize "Class@method" string syntax
+        if (is_string($callback) and str_contains($callback, '@')) {
+            [$class, $method] = explode('@', $callback);
+            $callback = [$this->make($class), $method];
+        }
+
+        // Handle Class Name with Default Method (e.g. call(Controller::class, [], 'index'))
+        if (is_string($callback) && $defaultMethod && class_exists($callback)) {
+            $callback = [$this->make($callback), $defaultMethod];
+        }
+
+        // Create Reflector & Determine Context Name
+        try {
+            if (is_array($callback)) {
+                // [Object, Method]
+                $reflector = new \ReflectionMethod($callback[0], $callback[1]);
+                $contextName = get_class($callback[0]) . '::' . $callback[1];
+            } elseif ($callback instanceof \Closure || is_string($callback)) {
+                // Function or Closure
+                $reflector = new \ReflectionFunction($callback);
+                $contextName = ($callback instanceof \Closure) ? 'Closure' : $callback;
+            } elseif (is_object($callback)) {
+                // Invokable Object (__invoke)
+                $reflector = new \ReflectionMethod($callback, '__invoke');
+                $contextName = get_class($callback) . '::__invoke';
+            } else {
+                throw new ContainerException("Invalid callback provided to call()");
+            }
+        } catch (ReflectionException $e) {
+            throw new ContainerException("Failed to reflect on callback: " . $e->getMessage());
+        }
+
+        // Analyze Parameters using our helper
+        $dependencies = $this->getReflectorParameters($reflector);
+
+        // Resolve Dependencies (Reusing your robust logic)
+        $instances = $this->resolveDependencies($contextName, $dependencies, $parameters);
+
+        // Invoke
+        return call_user_func_array($callback, $instances);
+    }
+
+    /**
      * Analyze the class once and cache the parameter definitions.
      */
     protected function cacheParameters(string $className): void
@@ -287,26 +342,13 @@ class App implements ContainerInterface
             return;
         }
 
-        $params = [];
-
-        foreach ($constructor->getParameters() as $param) {
-            $type = $param->getType();
-            $params[] = [
-                'name'        => $param->getName(),
-                'type_name'   => ($type instanceof ReflectionNamedType && !$type->isBuiltin()) ? $type->getName() : null,
-                'is_optional' => $param->isDefaultValueAvailable(),
-                'default'     => $param->isDefaultValueAvailable() ? $param->getDefaultValue() : null,
-                'nullable'    => $param->allowsNull(),
-                'variadic'    => $param->isVariadic(),
-            ];
-        }
-
-        static::$parameterCache[$className] = $params;
+        static::$parameterCache[$className] = $this->getReflectorParameters($constructor);
     }
 
     /**
      * Resolve class dependencies
      *
+     * @param string $className
      * @param array $dependencies
      * @param array $parameters
      *
@@ -332,8 +374,8 @@ class App implements ContainerInterface
                 if (isset($this->contextual[$className]) and isset($this->contextual[$className][$type])) {
                     $concrete = $this->contextual[$className][$type];
 
-                    // Use build() for Closures, make() for Strings
-                    $results[] = is_string($concrete) ? $this->make($concrete) : $this->build($concrete, $parameters);
+                    // Pass empty array [] to ensure dependencies are isolated from the parent's parameters
+                    $results[] = is_string($concrete) ? $this->make($concrete) : $this->build($concrete, []);
                     continue;
                 }
                 try {
@@ -362,4 +404,33 @@ class App implements ContainerInterface
 
         return $results;
     }
+
+    /**
+     * Extract parameter details from any function or method.
+     * Replaces the logic inside cacheParameters.
+     *
+     * @param ReflectionFunctionAbstract $reflector
+     *
+     * @return array
+     */
+    protected function getReflectorParameters(ReflectionFunctionAbstract $reflector): array
+    {
+        $params = [];
+
+        foreach ($reflector->getParameters() as $param) {
+            $type = $param->getType();
+            $params[] = [
+                'name'        => $param->getName(),
+                'type_name'   => ($type instanceof ReflectionNamedType and !$type->isBuiltin()) ? $type->getName() : null,
+                'is_optional' => $param->isDefaultValueAvailable(),
+                'default'     => $param->isDefaultValueAvailable() ? $param->getDefaultValue() : null,
+                'nullable'    => $param->allowsNull(),
+                'variadic'    => $param->isVariadic(),
+            ];
+        }
+
+        return $params;
+    }
+
+
 }
