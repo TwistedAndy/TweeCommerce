@@ -55,4 +55,22 @@ abstract class BaseController extends Controller
 
         // E.g.: $this->session = service('session');
     }
+
+    /**
+     * Intercept all method calls to enable Dependency Injection.
+     *
+     * @param string $method   The method being called (e.g., 'index', 'show')
+     * @param array ...$params The URL parameters (e.g., ['123', 'edit'])
+     */
+    public function _remap($method, ...$params)
+    {
+        // Check if the method actually exists
+        if (!method_exists($this, $method)) {
+            throw \CodeIgniter\Exceptions\PageNotFoundException::forPageNotFound();
+        }
+
+        // Delegate execution to the DI Container
+        return \App\Core\Container::getInstance()->call([$this, $method], $params);
+    }
+
 }
