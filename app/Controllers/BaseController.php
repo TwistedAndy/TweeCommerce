@@ -7,7 +7,12 @@ use CodeIgniter\HTTP\CLIRequest;
 use CodeIgniter\HTTP\IncomingRequest;
 use CodeIgniter\HTTP\RequestInterface;
 use CodeIgniter\HTTP\ResponseInterface;
-use Psr\Log\LoggerInterface;
+use CodeIgniter\Exceptions\PageNotFoundException;
+
+use \Psr\Log\LoggerInterface;
+
+use \App\Core\Container;
+use \App\Exceptions\ValidationException;
 
 /**
  * Class BaseController
@@ -70,7 +75,30 @@ abstract class BaseController extends Controller
         }
 
         // Delegate execution to the DI Container
-        return \App\Core\Container::getInstance()->call([$this, $method], $params);
+        try {
+            return Container::getInstance()->call([$this, $method], $params);
+        } catch (ValidationException $e) {
+            return $this->handleValidationError($e);
+        }
+
+    }
+
+    /**
+     * Handle validation exceptions in one place
+     */
+    protected function handleValidationError(ValidationException $exception): ResponseInterface
+    {
+        $errors = $exception->getErrors();
+
+        if ($this->request->isAJAX() or $this->request->getHeaderLine('Accept') === 'application/json') {
+            return $this->response->setJSON([
+                'code'    => $exception->getCode(),
+                'message' => $exception->getMessage(),
+                'errors'  => $errors,
+            ])->setStatusCode(422);
+        }
+
+        return redirect()->back()->withInput()->with('errors', $errors);
     }
 
 }

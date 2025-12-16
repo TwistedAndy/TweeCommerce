@@ -4,6 +4,9 @@ namespace App\Models;
 
 use App\Entities\Entity;
 use App\Entities\EntityInterface;
+use App\Exceptions\ContainerException;
+use App\Exceptions\ValidationException;
+
 use CodeIgniter\Model;
 use CodeIgniter\DataCaster\DataCaster;
 use CodeIgniter\Database\ConnectionInterface;
@@ -65,6 +68,34 @@ class EntityModel extends Model
         }
 
         return $id;
+    }
+
+    /**
+     * @param $row
+     *
+     * @return bool
+     * @throws ValidationException
+     */
+    public function save($row): bool
+    {
+        $this->validateData($row);
+
+        try {
+            return parent::save($row);
+        } catch (ReflectionException $exception) {
+            throw new ContainerException("Failed to reflect on callback: " . $exception->getMessage());
+        }
+    }
+
+    /**
+     * Throw an exception on validation fail
+     */
+    public function validateData($data): bool
+    {
+        if (!$this->validate($data)) {
+            throw new ValidationException($this->errors());
+        }
+        return true;
     }
 
     /**
