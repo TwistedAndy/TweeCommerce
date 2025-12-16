@@ -10,32 +10,43 @@ use ReflectionNamedType;
 use ReflectionException;
 use ReflectionClass;
 
-class App implements ContainerInterface
+class Container implements ContainerInterface
 {
     /**
-     * The Singleton instance of the Container itself.
+     * The Singleton instance of the Container itself
      */
-    protected static ?App $instance = null;
+    protected static ?Container $instance = null;
 
     /**
-     * Cache of constructor parameters for classes to avoid slow Reflection.
+     * Cache of function/method parameters to avoid slow Reflection
+     * Keys are unique identifiers for the callback (e.g. "Class::method" or Closure hash).
+     */
+    protected static array $functionCache = [];
+
+    /**
+     * Cache of constructor parameters for classes to avoid slow Reflection
      * Structure: [ 'ClassName' => [ ['name'=>'id', 'type'=>null, ...], ... ] ]
      */
     protected static array $parameterCache = [];
 
     /**
-     * Cache of resolved singleton objects.
+     * Stack of classes currently being built to detect recursion
+     */
+    protected array $buildStack = [];
+
+    /**
+     * Cache of resolved singleton objects
      */
     protected array $instances = [];
 
     /**
-     * Contextual bindings map.
+     * Contextual bindings map
      * [ 'ParentClass' => [ 'NeedsInterface' => 'GivesConcrete' ] ]
      */
     protected array $contextual = [];
 
     /**
-     * Registered bindings (Interface => Implementation).
+     * Registered bindings (Interface => Implementation)
      */
     protected array $bindings = [];
 
@@ -46,29 +57,48 @@ class App implements ContainerInterface
 
     /**
      * Use the container as a singleton
+     *
+     * @param object|array|null $config
      */
-    private function __construct()
+    private function __construct($config = null)
     {
-        $config = config(\Config\Container::class);
-        $this->bindings = $config->bindings ?? [];
-        $this->singletons = array_fill_keys($config->singletons ?? [], true);
+        if (is_object($config)) {
+            $this->bindings = $config->bindings ?? [];
+            $this->singletons = array_fill_keys($config->singletons ?? [], true);
+        } elseif (is_array($config)) {
+            $this->bindings = $config['bindings'] ?? [];
+            $this->singletons = array_fill_keys($config['singletons'] ?? [], true);
+        }
     }
 
     /**
-     * Get the global container instance.
+     * Get the global container instance
      */
-    public static function getInstance(): App
+    public static function getInstance($config = null): Container
     {
         if (static::$instance === null) {
-            static::$instance = new static();
+            if ($config === null and class_exists(\Config\Container::class)) {
+                $config = new \Config\Container();
+            }
+            static::$instance = new static($config);
         }
         return static::$instance;
     }
 
     /**
-     * PSR-11: Finds an entry of the container by its identifier and returns it.
+     * Reset the container instance
+     */
+    public static function reset(): void
+    {
+        static::$instance = null;
+        static::$functionCache = [];
+        static::$parameterCache = [];
+    }
+
+    /**
+     * PSR-11: Finds an entry of the container by its identifier and returns it
      *
-     * @param string $id Identifier of the entry to look for.
+     * @param string $id Identifier of the entry to look for
      *
      * @return mixed
      *
@@ -141,6 +171,21 @@ class App implements ContainerInterface
     }
 
     /**
+     * Define a contextual binding: when class {$class} asks for {$needs}, give it {$give}
+     *
+     * @param string $class         The Class Name that needs the dependency
+     * @param string $needs         The Interface/Class dependency needed
+     * @param string|callable $give The Concrete implementation to provide
+     */
+    public function bindWhen(string $class, string $needs, string|callable $give): void
+    {
+        if (!isset($this->contextual[$class])) {
+            $this->contextual[$class] = [];
+        }
+        $this->contextual[$class][$needs] = $give;
+    }
+
+    /**
      * Register a shared binding (Singleton).
      */
     public function singleton(string $abstract, string|callable $concrete): void
@@ -149,35 +194,16 @@ class App implements ContainerInterface
     }
 
     /**
-     * Define a contextual binding: when class {$when} asks for {$needs}, give it {$give}.
-     *
-     * @param string $when          The Class Name that needs the dependency (Parent)
-     * @param string $needs         The Interface/Class dependency needed
-     * @param string|callable $give The Concrete implementation to provide
-     */
-    public function bindContextual(string $when, string $needs, string|callable $give): void
-    {
-        if (!isset($this->contextual[$when])) {
-            $this->contextual[$when] = [];
-        }
-        $this->contextual[$when][$needs] = $give;
-    }
-
-    /**
      * Resolve a dependency.
      */
     public function make(string $abstract, array $parameters = [])
     {
-        /**
-         * Check the cache for the abstract class first
-         */
+        // Check the cache for the abstract class first
         if (isset($this->instances[$abstract])) {
             return $this->instances[$abstract];
         }
 
-        /**
-         * Resolve bindings Alias/Interface -> Concrete Class
-         */
+        // Resolve bindings Alias/Interface -> Concrete Class
         $concrete = $abstract;
         $chain = [];
 
@@ -189,15 +215,24 @@ class App implements ContainerInterface
             $concrete = $this->bindings[$concrete];
         }
 
-        /**
-         * Fill the instance cache for singletons
-         */
+        // Fill the instance cache for singletons
         if (is_string($concrete) and isset($this->instances[$concrete])) {
             $this->instances[$abstract] = $this->instances[$concrete];
             return $this->instances[$concrete];
         }
 
-        $object = $this->build($concrete, $parameters);
+        // Detect Circular Dependencies
+        if (isset($this->buildStack[$abstract])) {
+            throw new ContainerException("Circular dependency detected: " . implode(' -> ', array_keys($this->buildStack)) . " -> $abstract");
+        }
+
+        $this->buildStack[$abstract] = true;
+
+        try {
+            $object = $this->build($concrete, $parameters);
+        } finally {
+            unset($this->buildStack[$abstract]); // Always remove from stack, even if build fails
+        }
 
         if (isset($this->singletons[$abstract]) or (is_string($concrete) and isset($this->singletons[$concrete]))) {
             $this->instances[$abstract] = $object;
@@ -220,9 +255,7 @@ class App implements ContainerInterface
 
         if (!class_exists($concrete)) {
 
-            /**
-             * If it's not a class, it might be a Service alias or a dynamic service
-             */
+            // If it's not a class, it might be a service alias or a dynamic service
             $service = service($concrete);
 
             if (is_object($service)) {
@@ -286,38 +319,60 @@ class App implements ContainerInterface
         }
 
         // Handle Class Name with Default Method (e.g. call(Controller::class, [], 'index'))
-        if (is_string($callback) && $defaultMethod && class_exists($callback)) {
+        if (is_string($callback) and $defaultMethod and class_exists($callback)) {
             $callback = [$this->make($callback), $defaultMethod];
         }
 
-        // Create Reflector & Determine Context Name
-        try {
-            if (is_array($callback)) {
-                // [Object, Method]
-                $reflector = new \ReflectionMethod($callback[0], $callback[1]);
-                $contextName = get_class($callback[0]) . '::' . $callback[1];
-            } elseif ($callback instanceof \Closure || is_string($callback)) {
-                // Function or Closure
-                $reflector = new \ReflectionFunction($callback);
-                $contextName = ($callback instanceof \Closure) ? 'Closure' : $callback;
-            } elseif (is_object($callback)) {
-                // Invokable Object (__invoke)
-                $reflector = new \ReflectionMethod($callback, '__invoke');
-                $contextName = get_class($callback) . '::__invoke';
-            } else {
-                throw new ContainerException("Invalid callback provided to call()");
-            }
-        } catch (ReflectionException $e) {
-            throw new ContainerException("Failed to reflect on callback: " . $e->getMessage());
+        // Generate a cache key to store/retrieve reflection data
+        if (is_array($callback)) {
+            // array: "ClassName::method"
+            $cacheKey = is_object($callback[0]) ? get_class($callback[0]) : $callback[0];
+            $cacheKey .= '::' . $callback[1];
+        } elseif (is_string($callback)) {
+            // string: "functionName"
+            $cacheKey = $callback;
+        } elseif ($callback instanceof \Closure) {
+            // closure: Unique Object Hash
+            $cacheKey = spl_object_hash($callback);
+        } elseif (is_object($callback)) {
+            // invokable: "ClassName::__invoke"
+            $cacheKey = get_class($callback) . '::__invoke';
+        } else {
+            $cacheKey = null;
         }
 
-        // Analyze Parameters using our helper
-        $dependencies = $this->getReflectorParameters($reflector);
+        // 4. Check function cache or use reflection
+        if ($cacheKey and isset(static::$functionCache[$cacheKey])) {
+            $dependencies = static::$functionCache[$cacheKey];
+            $contextName = $cacheKey;
+        } else {
+            try {
+                if (is_array($callback)) {
+                    $reflector = new \ReflectionMethod($callback[0], $callback[1]);
+                    $contextName = $cacheKey;
+                } elseif ($callback instanceof \Closure || is_string($callback)) {
+                    $reflector = new \ReflectionFunction($callback);
+                    $contextName = ($callback instanceof \Closure) ? 'Closure' : $callback;
+                } elseif (is_object($callback)) {
+                    $reflector = new \ReflectionMethod($callback, '__invoke');
+                    $contextName = $cacheKey;
+                } else {
+                    throw new ContainerException("Invalid callback provided to call()");
+                }
+            } catch (ReflectionException $e) {
+                throw new ContainerException("Failed to reflect on callback: " . $e->getMessage());
+            }
 
-        // Resolve Dependencies (Reusing your robust logic)
+            $dependencies = $this->getReflectorParameters($reflector);
+
+            if ($cacheKey) {
+                static::$functionCache[$cacheKey] = $dependencies;
+            }
+        }
+
+        // Resolve & Invoke
         $instances = $this->resolveDependencies($contextName, $dependencies, $parameters);
 
-        // Invoke
         return call_user_func_array($callback, $instances);
     }
 
@@ -357,13 +412,14 @@ class App implements ContainerInterface
     protected function resolveDependencies(string $className, array $dependencies, array $parameters): array
     {
         $results = [];
+        $numericIndex = 0; // Cursor for positional arguments (0, 1, 2...)
 
         foreach ($dependencies as $dep) {
 
             $name = $dep['name'];
             $type = $dep['type_name'];
 
-            // Named Parameter Override
+            // Named Parameters
             if (array_key_exists($name, $parameters)) {
                 $results[] = $parameters[$name];
                 continue;
@@ -379,7 +435,7 @@ class App implements ContainerInterface
                     continue;
                 }
                 try {
-                    $results[] = $this->make($dep['type_name']);
+                    $results[] = $this->make($type);
                 } catch (ContainerException $e) {
                     if ($dep['nullable']) {
                         $results[] = null;
@@ -390,14 +446,26 @@ class App implements ContainerInterface
                 continue;
             }
 
-            // Primitives / Optionals
+            // Positional Parameters
+            if (array_key_exists($numericIndex, $parameters)) {
+                $results[] = $parameters[$numericIndex];
+                $numericIndex++; // Move cursor to the next argument
+                continue;
+            }
+
+            // Variadic (Consume remaining)
+            if ($dep['variadic']) {
+                while (array_key_exists($numericIndex, $parameters)) {
+                    $results[] = $parameters[$numericIndex];
+                    $numericIndex++;
+                }
+                continue;
+            }
+
+            // Defaults
             if ($dep['is_optional']) {
                 $results[] = $dep['default'];
-            } elseif ($dep['variadic']) {
-                // Variadics are optional by definition
-                $results[] = [];
             } else {
-                // We don't have the class name handy in the array, but we can usually infer context
                 throw new ContainerException("Unresolvable dependency: Parameter '\${$name}' in class '{$className}' is missing a value.");
             }
         }

@@ -14,7 +14,7 @@
  * @see: https://codeigniter.com/user_guide/extending/common.html
  */
 
-use App\Core\App;
+use App\Core\Container;
 
 if (!function_exists('app')) {
     /**
@@ -27,14 +27,14 @@ if (!function_exists('app')) {
      * @param string|class-string<T>|null $id
      * @param array $params
      *
-     * @return T|App
+     * @return T|Container
      */
     function app(?string $id = null, array $params = [])
     {
         static $container;
 
         if ($container === null) {
-            $container = \App\Core\App::getInstance();
+            $container = \App\Core\Container::getInstance();
         }
 
         if ($id === null) {
