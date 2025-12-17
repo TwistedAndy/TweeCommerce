@@ -312,68 +312,123 @@ class Container implements ContainerInterface
      */
     public function call(mixed $callback, array $parameters = [], ?string $defaultMethod = null): mixed
     {
-        // Normalize "Class@method" string syntax
-        if (is_string($callback) and str_contains($callback, '@')) {
-            [$class, $method] = explode('@', $callback);
-            $callback = [$this->make($class), $method];
-        }
+        $parsedClass = null;
+        $parsedMethod = null;
 
-        // Handle Class Name with Default Method (e.g. call(Controller::class, [], 'index'))
-        if (is_string($callback) and $defaultMethod and class_exists($callback)) {
-            $callback = [$this->make($callback), $defaultMethod];
-        }
-
-        // Generate a cache key to store/retrieve reflection data
-        if (is_array($callback)) {
-            // array: "ClassName::method"
-            $cacheKey = is_object($callback[0]) ? get_class($callback[0]) : $callback[0];
-            $cacheKey .= '::' . $callback[1];
-        } elseif (is_string($callback)) {
-            // string: "functionName"
-            $cacheKey = $callback;
-        } elseif ($callback instanceof \Closure) {
-            // closure: Unique Object Hash
-            $cacheKey = spl_object_hash($callback);
-        } elseif (is_object($callback)) {
-            // invokable: "ClassName::__invoke"
-            $cacheKey = get_class($callback) . '::__invoke';
+        if (is_string($callback)) {
+            $callbackKey = $callback;
+            if (!function_exists($callback)) {
+                if (str_contains($callback, '@')) {
+                    [$parsedClass, $parsedMethod] = explode('@', $callback);
+                } elseif (str_contains($callback, '::')) {
+                    [$parsedClass, $parsedMethod] = explode('::', $callback);
+                } elseif ($defaultMethod and class_exists($callback)) {
+                    $parsedClass = $callback;
+                    $parsedMethod = $defaultMethod;
+                }
+            }
         } else {
-            $cacheKey = null;
+            $callbackKey = $this->getCallbackKey($callback);
         }
 
-        // 4. Check function cache or use reflection
-        if ($cacheKey and isset(static::$functionCache[$cacheKey])) {
-            $dependencies = static::$functionCache[$cacheKey];
-            $contextName = $cacheKey;
+        // Check function cache or use a reflection
+        if ($callbackKey and isset(static::$functionCache[$callbackKey])) {
+            $dependencies = static::$functionCache[$callbackKey];
+            $contextName = $callbackKey;
         } else {
             try {
-                if (is_array($callback)) {
-                    $reflector = new \ReflectionMethod($callback[0], $callback[1]);
-                    $contextName = $cacheKey;
-                } elseif ($callback instanceof \Closure || is_string($callback)) {
+                if ($parsedClass) {
+                    $reflector = new \ReflectionMethod($parsedClass, $parsedMethod);
+                    $contextName = $callback;
+                } elseif (is_string($callback) && function_exists($callback)) {
                     $reflector = new \ReflectionFunction($callback);
-                    $contextName = ($callback instanceof \Closure) ? 'Closure' : $callback;
+                    $contextName = $callback;
+                } elseif (is_array($callback)) {
+                    $reflector = new \ReflectionMethod($callback[0], $callback[1]);
+                    $contextName = $callbackKey;
+                } elseif ($callback instanceof \Closure) {
+                    $reflector = new \ReflectionFunction($callback);
+                    $contextName = 'Closure';
                 } elseif (is_object($callback)) {
                     $reflector = new \ReflectionMethod($callback, '__invoke');
-                    $contextName = $cacheKey;
+                    $contextName = $callbackKey;
                 } else {
-                    throw new ContainerException("Invalid callback provided to call()");
+                    throw new ContainerException('Invalid callback provided to call(): ' . serialize($callback));
                 }
             } catch (ReflectionException $e) {
-                throw new ContainerException("Failed to reflect on callback: " . $e->getMessage());
+                throw new ContainerException('Failed to reflect on callback: ' . $e->getMessage());
             }
 
             $dependencies = $this->getReflectorParameters($reflector);
 
-            if ($cacheKey) {
-                static::$functionCache[$cacheKey] = $dependencies;
+            if ($callbackKey) {
+                static::$functionCache[$callbackKey] = $dependencies;
             }
         }
 
         // Resolve & Invoke
         $instances = $this->resolveDependencies($contextName, $dependencies, $parameters);
 
+        if ($parsedClass) {
+            $needsInstantiation = true;
+
+            if (str_contains($callback, '::')) {
+                try {
+                    $ref = new \ReflectionMethod($parsedClass, $parsedMethod);
+                    if ($ref->isStatic()) {
+                        $needsInstantiation = false;
+                    }
+                } catch (ReflectionException $e) {
+                    throw new ContainerException('Failed to reflect on callback: ' . $e->getMessage());
+                }
+            }
+
+            if ($needsInstantiation) {
+                $callback = [$this->make($parsedClass), $parsedMethod];
+            }
+        }
+
         return call_user_func_array($callback, $instances);
+    }
+
+    /**
+     * Generates a persistent key for a callback
+     *
+     * @param callable|string|object|array $callback
+     *
+     * @return string|null
+     */
+    public function getCallbackKey($callback): string|null
+    {
+        if (is_array($callback)) {
+            if (isset($callback[0]) and isset($callback[1])) {
+                return (is_object($callback[0]) ? get_class($callback[0]) : $callback[0]) . '::' . $callback[1];
+            } else {
+                throw new ContainerException('Invalid callback arguments: ' . serialize($callback));
+            }
+        } elseif ($callback instanceof \Closure) {
+
+            try {
+                $reflector = new \ReflectionFunction($callback);
+            } catch (\ReflectionException $e) {
+                throw new ContainerException('Failed to reflect on callback: ' . $e->getMessage());
+            }
+
+            $file = $reflector->getFileName();
+
+            if (defined('ROOTPATH')) {
+                $file = str_replace(ROOTPATH, '', $file);
+            }
+
+            return 'closure_' . $file . ':' . $reflector->getStartLine();
+
+        } elseif (is_object($callback)) {
+            return get_class($callback) . '::__invoke';
+        } elseif (is_string($callback)) {
+            return $callback;
+        } else {
+            return null;
+        }
     }
 
     /**
@@ -401,7 +456,7 @@ class Container implements ContainerInterface
     }
 
     /**
-     * Resolve class dependencies
+     * Resolve class dependencies and return them as an array of arguments
      *
      * @param string $className
      * @param array $dependencies
@@ -422,11 +477,24 @@ class Container implements ContainerInterface
             // Named Parameters
             if (array_key_exists($name, $parameters)) {
                 $results[] = $parameters[$name];
+
+                // Skip a positional value if it exists at the current cursor, so it doesn't accidentally shift to the next argument
+                if (array_key_exists($numericIndex, $parameters)) {
+                    $numericIndex++;
+                }
                 continue;
             }
 
-            // Class Dependency (Autowiring)
+            // Class Dependency (Auto-wiring)
             if ($type !== null) {
+
+                // If the passed parameter at $numericIndex is an instance of the required type, use it!
+                if (array_key_exists($numericIndex, $parameters) and $parameters[$numericIndex] instanceof $type) {
+                    $results[] = $parameters[$numericIndex];
+                    $numericIndex++;
+                    continue;
+                }
+
                 if (isset($this->contextual[$className]) and isset($this->contextual[$className][$type])) {
                     $concrete = $this->contextual[$className][$type];
 
