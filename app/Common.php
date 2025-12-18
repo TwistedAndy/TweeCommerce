@@ -19,22 +19,18 @@ use App\Core\Container;
 if (!function_exists('app')) {
     /**
      * Resolve a dependency from the container.
-     * * Usage:
-     * 1. Get Object: resolve(MyClass::class)
-     * 2. Get Container (to bind): resolve()->bind(...)
-     * * @template T
      *
-     * @param string|class-string<T>|null $id
+     * @param string|null $id
      * @param array $params
      *
-     * @return T|Container
+     * @return mixed|Container
      */
     function app(?string $id = null, array $params = [])
     {
         static $container;
 
         if ($container === null) {
-            $container = \App\Core\Container::getInstance();
+            $container = Container::getInstance();
         }
 
         if ($id === null) {

@@ -256,7 +256,7 @@ class Container implements ContainerInterface
         if (!class_exists($concrete)) {
 
             // If it's not a class, it might be a service alias or a dynamic service
-            $service = service($concrete);
+            $service = service($concrete, ...$parameters);
 
             if (is_object($service)) {
                 return $service;
