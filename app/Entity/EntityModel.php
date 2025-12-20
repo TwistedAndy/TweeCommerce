@@ -1,32 +1,27 @@
 <?php
 
-namespace App\Models;
+namespace App\Entity;
 
-use App\Entities\Entity;
-use App\Entities\EntityInterface;
 use App\Exceptions\ContainerException;
 use App\Exceptions\ValidationException;
-
-use CodeIgniter\Model;
-use CodeIgniter\DataCaster\DataCaster;
-use CodeIgniter\Database\ConnectionInterface;
-use CodeIgniter\Database\Exceptions\DataException;
 use CodeIgniter\Exceptions\InvalidArgumentException;
 use CodeIgniter\Validation\ValidationInterface;
-use CodeIgniter\I18n\Time;
+use CodeIgniter\Database\Exceptions\DataException;
+use CodeIgniter\Database\ConnectionInterface;
+use CodeIgniter\Model;
 use ReflectionException;
 
 class EntityModel extends Model
 {
     protected static array $entityCache = [];
 
-    protected DataCaster $dataCaster;
+    protected EntityCaster $dataCaster;
 
     protected $primaryKey = 'id';
     protected $dateFormat = 'int';
     protected $returnType = Entity::class;
 
-    protected $useSoftDeletes = true;
+    protected $useSoftDeletes = false;
     protected $protectFields = false;
 
     // Dates
@@ -43,7 +38,26 @@ class EntityModel extends Model
 
     public function __construct(ConnectionInterface $db = null, ValidationInterface $validation = null)
     {
-        $this->dataCaster = new DataCaster($this->castHandlers, $this->casts, $this->db, false);
+        $entity = $this->returnType;
+
+        if (!is_subclass_of($entity, EntityInterface::class)) {
+            throw new \RuntimeException("{$entity} must implement EntityInterface.");
+        }
+
+        $this->table = $entity::getEntityKey() . 's';
+        $this->casts = $entity::getEntityCasts();
+        $this->primaryKey = $entity::getEntityKey();
+
+        $this->allowedFields = array_keys($entity::getEntityDefaults());
+        $this->validationRules = $entity::getEntityRules();
+        $this->validationMessages = $entity::getEntityMessages();
+
+        $this->dataCaster = new EntityCaster(
+            $this->casts,
+            $entity::getEntityCastHandlers(),
+            $db ?? \Config\Database::connect(),
+        );
+
         parent::__construct($db, $validation);
     }
 
@@ -207,7 +221,7 @@ class EntityModel extends Model
          */
         if (!empty($data['id'])) {
 
-            $row = $this->convertRowToEntry($data['data']);
+            $row = $this->dataCaster->fromDataSource($data['data']);
 
             /**
              * Process the regular inserts
@@ -244,7 +258,7 @@ class EntityModel extends Model
             if (isset(static::$entityCache[$id])) {
                 static::$entityCache[$id] = array_merge(
                     static::$entityCache[$id],
-                    $this->convertRowToEntry($row)
+                    $this->dataCaster->fromDataSource($row)
                 );
             }
         }
@@ -280,12 +294,12 @@ class EntityModel extends Model
      */
     protected function convertToReturnType(array $row, string $returnType): array|object
     {
-        if ($returnType === Entity::class) {
-            return new Entity($this->convertRowToEntry($row));
+        if ($returnType === $this->returnType) {
+            return new $returnType($this->dataCaster->fromDataSource($row));
         } elseif ($returnType === 'array') {
-            return $this->convertRowToEntry($row);
+            return $this->dataCaster->fromDataSource($row);
         } elseif ($returnType === 'object') {
-            return (object) $this->convertRowToEntry($row);
+            return (object) $this->dataCaster->fromDataSource($row);
         } else {
             return parent::convertToReturnType($row, $returnType);
         }
@@ -326,205 +340,10 @@ class EntityModel extends Model
             $row = $this->objectToArray($row, $onlyChanged, false);
         }
 
-        $row = $this->convertEntryToRow((array) $row);
+        $row = $this->dataCaster->toDataSource((array) $row);
 
         if (!$this->allowEmptyInserts and empty($row)) {
             throw DataException::forEmptyDataset($type);
-        }
-
-        return $row;
-    }
-
-    /**
-     * Convert a database row array to entry data array
-     *
-     * @param array<string, mixed> $row
-     *
-     * @return array<string, mixed>
-     */
-    protected function convertRowToEntry(array $row): array
-    {
-        if (empty($this->casts)) {
-            return $row;
-        }
-
-        foreach ($this->casts as $field => $type) {
-            if (!isset($row[$field])) {
-                continue;
-            }
-
-            $type = ltrim($type, '?');
-
-            $value = $row[$field];
-
-            switch ($type) {
-                case 'int':
-                case 'integer':
-                    if (!is_int($value)) {
-                        $row[$field] = (int) $value;
-                    }
-                    break;
-                case 'bool':
-                case 'boolean':
-                case 'int-bool':
-                    if (!is_bool($value)) {
-                        $row[$field] = (bool) $value;
-                    }
-                    break;
-                case 'float':
-                case 'double':
-                    if (!is_float($value)) {
-                        $row[$field] = (float) $value;
-                    }
-                    break;
-                case 'json':
-                    if (is_string($value)) {
-                        $row[$field] = json_decode($value, false);
-                    } elseif (!is_object($value)) {
-                        $row[$field] = (object) $value;
-                    }
-                    break;
-                case 'json-array':
-                    if (is_string($value)) {
-                        $row[$field] = json_decode($value, true);
-                    } elseif (!is_array($value)) {
-                        $row[$field] = (array) $value;
-                    }
-                    break;
-                case 'array':
-                    if (is_string($value) and (str_starts_with($value, 'a:') or str_starts_with($value, 's:'))) {
-                        $row[$field] = unserialize($value, ['allowed_classes' => false]);
-                    } elseif (!is_array($value)) {
-                        $row[$field] = (array) $value;
-                    }
-                    break;
-                case 'datetime':
-                case 'datetime-ms':
-                case 'datetime-us':
-                case 'timestamp':
-                    if (is_string($value) or is_numeric($value)) {
-                        try {
-                            if (is_numeric($value) and $type === 'timestamp') {
-                                $row[$field] = Time::createFromTimestamp(
-                                    (int) $value,
-                                    date_default_timezone_get()
-                                );
-                            } else {
-                                $row[$field] = Time::createFromFormat(
-                                    $this->db->dateFormat[$type],
-                                    $value
-                                );
-                            }
-                        } catch (\Exception $e) {
-                            $row[$field] = null;
-                        }
-                    } elseif (!($value instanceof Time)) {
-                        $row[$field] = null;
-                    }
-                    break;
-                case 'csv':
-                    if (!is_array($value)) {
-                        $row[$field] = explode(',', (string) $value);
-                    }
-                    break;
-                default:
-                    $row[$field] = $this->dataCaster->castAs($value, $field, 'get');
-            }
-        }
-
-        return $row;
-    }
-
-    /**
-     * Convert entry data array to a database row array
-     *
-     * @param array<string, mixed> $row
-     *
-     * @return array<string, mixed>
-     */
-    protected function convertEntryToRow(array $row): array
-    {
-        if (empty($this->casts)) {
-            return $row;
-        }
-
-        foreach ($this->casts as $field => $type) {
-            if (!isset($row[$field])) {
-                continue;
-            }
-
-            $type = ltrim($type, '?');
-            $value = $row[$field];
-
-            switch ($type) {
-                case 'int':
-                case 'integer':
-                    if (!is_int($value)) {
-                        $row[$field] = (int) $value;
-                    }
-                    break;
-                case 'bool':
-                case 'boolean':
-                case 'int-bool':
-                    $row[$field] = $value ? 1 : 0;
-                    break;
-                case 'float':
-                case 'double':
-                    if (!is_float($value)) {
-                        $row[$field] = (float) $value;
-                    }
-                    break;
-                case 'json':
-                case 'json-array':
-                    if (is_array($value) or is_object($value)) {
-                        $row[$field] = json_encode($value, JSON_UNESCAPED_UNICODE);
-                    }
-                    break;
-                case 'array':
-                    if (!is_string($value)) {
-                        $row[$field] = serialize($value);
-                    }
-                    break;
-                case 'datetime':
-                case 'datetime-ms':
-                case 'datetime-us':
-                    if ($value instanceof Time) {
-                        $row[$field] = $value->format($this->db->dateFormat[$type]);
-                    } else {
-                        if (is_numeric($value)) {
-                            $timestamp = (int) $value;
-                        } else {
-                            $timestamp = strtotime($value);
-                        }
-                        if ($timestamp > 0) {
-                            $row[$field] = date($this->db->dateFormat[$type], $timestamp);
-                        } else {
-                            $row[$field] = null;
-                        }
-                    }
-                    break;
-                case 'timestamp':
-                    if ($value instanceof Time) {
-                        $row[$field] = $value->getTimestamp();
-                    } elseif (is_numeric($value)) {
-                        $row[$field] = (int) $value;
-                    } elseif (is_string($value)) {
-                        $row[$field] = strtotime($value);
-                    } else {
-                        $row[$field] = null;
-                    }
-                    break;
-                case 'csv':
-                    if (is_object($value)) {
-                        $value = (array) $value;
-                    } elseif (!is_array($value)) {
-                        $value = [(string) $value];
-                    }
-                    $row[$field] = implode(',', $value);
-                    break;
-                default:
-                    $row[$field] = $this->dataCaster->castAs($value, $field, 'set');
-            }
         }
 
         return $row;

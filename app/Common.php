@@ -40,3 +40,18 @@ if (!function_exists('app')) {
         return $container->make($id, $params);
     }
 }
+
+if (function_exists('__')) {
+    /**
+     * Translate a string
+     *
+     * @param string $name
+     * @param string $domain
+     *
+     * @return string
+     */
+    function __(string $name, string $domain = 'system'): string
+    {
+        return $name;
+    }
+}

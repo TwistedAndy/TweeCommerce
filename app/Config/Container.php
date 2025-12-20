@@ -65,7 +65,7 @@ class Container extends BaseConfig
         \CodeIgniter\Email\Email::class                     => 'email',
 
         // Application Bindings
-        \App\Entities\EntityInterface::class                => \App\Entities\Entity::class,
+        \App\Entity\EntityInterface::class                  => \App\Entity\Entity::class,
     ];
 
 
