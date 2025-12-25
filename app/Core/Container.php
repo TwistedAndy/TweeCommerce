@@ -62,6 +62,11 @@ class Container implements ContainerInterface
     protected array $resolutionCache = [];
 
     /**
+     * The resolving callbacks
+     */
+    protected array $resolvingCallbacks = [];
+
+    /**
      * Use the container as a singleton
      *
      * @param object|array|null $config
@@ -372,9 +377,25 @@ class Container implements ContainerInterface
             }
         }
 
+        $className = $object::class;
+
+        // Handle the resolving callbacks for an abstract
+        if (isset($this->resolvingCallbacks[$abstract])) {
+            foreach ($this->resolvingCallbacks[$abstract] as $callback) {
+                $callback($object, $this);
+            }
+        }
+
+        // Handle the resolving callbacks for a concrete class
+        if ($className !== $abstract and isset($this->resolvingCallbacks[$className])) {
+            foreach ($this->resolvingCallbacks[$className] as $callback) {
+                $callback($object, $this);
+            }
+        }
+
         // Save the class name to the resolution cache
         if (empty($parameters)) {
-            $this->resolutionCache[$abstract] = $object::class;
+            $this->resolutionCache[$abstract] = $className;
         }
 
         return $object;
@@ -450,6 +471,7 @@ class Container implements ContainerInterface
     {
         $parsedClass = null;
         $parsedMethod = null;
+        $reflector = null;
 
         if (is_string($callback)) {
             $callbackKey = $callback;
@@ -458,9 +480,9 @@ class Container implements ContainerInterface
                     [$parsedClass, $parsedMethod] = explode('@', $callback);
                 } elseif (str_contains($callback, '::')) {
                     [$parsedClass, $parsedMethod] = explode('::', $callback);
-                } elseif ($defaultMethod and class_exists($callback)) {
+                } elseif (class_exists($callback)) {
                     $parsedClass = $callback;
-                    $parsedMethod = $defaultMethod;
+                    $parsedMethod = $defaultMethod ?? '__invoke';
                 }
             }
         } else {
@@ -508,15 +530,17 @@ class Container implements ContainerInterface
         if ($parsedClass) {
             $needsInstantiation = true;
 
-            if (str_contains($callback, '::')) {
+            if (!$reflector) {
                 try {
-                    $ref = new \ReflectionMethod($parsedClass, $parsedMethod);
-                    if ($ref->isStatic()) {
-                        $needsInstantiation = false;
-                    }
+                    $reflector = new \ReflectionMethod($parsedClass, $parsedMethod);
                 } catch (ReflectionException $e) {
                     throw new ContainerException('Failed to reflect on callback: ' . $e->getMessage());
                 }
+            }
+
+            if ($reflector->isStatic()) {
+                $needsInstantiation = false;
+                $callback = [$parsedClass, $parsedMethod];
             }
 
             if ($needsInstantiation) {
@@ -525,6 +549,23 @@ class Container implements ContainerInterface
         }
 
         return call_user_func_array($callback, $instances);
+    }
+
+    /**
+     * Register a callback to be run after creating an object
+     *
+     * @param string $abstract
+     * @param callable $callback
+     *
+     * @return void
+     */
+    public function resolving(string $abstract, callable $callback): void
+    {
+        if (!isset($this->resolvingCallbacks[$abstract])) {
+            $this->resolvingCallbacks[$abstract] = [];
+        }
+
+        $this->resolvingCallbacks[$abstract][] = $callback;
     }
 
     /**
