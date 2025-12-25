@@ -8,17 +8,17 @@ namespace App\Libraries;
 class Sanitizer
 {
     /**
-     * Allow only minimal set of HTML tags
+     * Basic set of HTML tags
      */
-    public const TAGS_MINIMAL = '<a><b><strong><em><i><ins><del><sup><sub><u><s><small><span><abbr><br><wbr>';
+    public const TAGS_BASIC = '<a><b><strong><em><i><ins><del><sup><sub><u><s><small><span><abbr><br><wbr>';
 
     /**
-     * Allow only standard set of HTML tags
+     * Standard set of HTML tags
      */
-    public const TAGS_STANDARD = '<a><b><strong><em><i><ins><del><sup><sub><u><s><small><span><abbr><br><wbr><div><section><article><aside><nav><main><menu><h1><h2><h3><h4><h5><h6><code><pre><p><ul><ol><li><blockquote><q><cite><author><table><thead><tbody><tfoot><tr><th><td><img><picture><video><source><audio><track><figure><figcaption><dl><dt><dialog><details><col><colgroup><summary><rp><rt><ruby><samp><time><style><button><label><legend><kbd><map><mark>';
+    public const TAGS_DEFAULT = '<a><b><strong><em><i><ins><del><sup><sub><u><s><small><span><abbr><br><wbr><div><section><article><aside><nav><main><menu><h1><h2><h3><h4><h5><h6><code><pre><p><ul><ol><li><blockquote><q><cite><author><table><thead><tbody><tfoot><tr><th><td><img><picture><video><source><audio><track><figure><figcaption><dl><dt><dialog><details><col><colgroup><summary><rp><rt><ruby><samp><time><style><button><label><legend><kbd><map><mark>';
 
     /**
-     * Allow all tags
+     * All HTML tags
      */
     public const TAGS_FULL = 'full';
 
@@ -150,11 +150,11 @@ class Sanitizer
         }
 
         if ($allowedTags === null) {
-            $html = strip_tags($html, static::TAGS_STANDARD);
+            $html = strip_tags($html, static::TAGS_DEFAULT);
         } elseif ($allowedTags !== static::TAGS_FULL) {
             $allowedTags = match ($allowedTags) {
-                'minimal' => static::TAGS_MINIMAL,
-                'standard' => static::TAGS_STANDARD,
+                'basic' => static::TAGS_BASIC,
+                'default' => static::TAGS_DEFAULT,
                 default => $allowedTags,
             };
             $html = strip_tags($html, $allowedTags);

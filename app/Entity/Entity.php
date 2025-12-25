@@ -2,7 +2,7 @@
 
 namespace App\Entity;
 
-use CodeIgniter\DataCaster\DataCaster;
+use App\Libraries\Escaper;
 use CodeIgniter\Exceptions\BadMethodCallException;
 
 use JsonSerializable;
@@ -162,6 +162,11 @@ class Entity implements EntityInterface, JsonSerializable
     protected array $original = [];
 
     /**
+     * Cached escaped values to prevent redundant escaping operations.
+     */
+    protected array $escaped = [];
+
+    /**
      * One-time initialization of static class data
      * Prevents redundant processing during bulk instantiation
      */
@@ -210,7 +215,19 @@ class Entity implements EntityInterface, JsonSerializable
                 return $this->$method();
             }
 
-            return $this->attributes[$key] ?? null;
+            $value = $this->attributes[$key] ?? null;
+
+            if (is_string($value) and $value) {
+                $casts = static::getEntityCasts();
+                if (!isset($casts[$key]) or $casts[$key] === 'text') {
+                    if (!isset($this->escaped[$key])) {
+                        $this->escaped[$key] = Escaper::escapeHtml($value);
+                    }
+                    $value = $this->escaped[$key];
+                }
+            }
+
+            return $value;
         }
 
         return null;
@@ -242,7 +259,7 @@ class Entity implements EntityInterface, JsonSerializable
         $attribute = static::$resolvedMethods[static::class][$method];
 
         if (str_starts_with($method, 'get')) {
-            return $this->attributes[$attribute] ?? null;
+            return $this->__get($attribute);
         }
 
         if (str_starts_with($method, 'set')) {
@@ -299,6 +316,10 @@ class Entity implements EntityInterface, JsonSerializable
             }
 
             $this->attributes[$attribute] = $newValue;
+
+            if (isset($this->escaped[$attribute])) {
+                unset($this->escaped[$attribute]);
+            }
 
             if ($this->attributes[$attribute] === ($this->original[$attribute] ?? null)) {
                 unset($this->original[$attribute]);

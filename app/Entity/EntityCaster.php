@@ -2,6 +2,8 @@
 
 namespace App\Entity;
 
+use App\Libraries\Sanitizer;
+
 use CodeIgniter\DataCaster\Exceptions\CastException;
 use CodeIgniter\DataCaster\Cast\ArrayCast;
 use CodeIgniter\DataCaster\Cast\BooleanCast;
@@ -81,21 +83,18 @@ class EntityCaster
      */
     public function toDataSource(array $data): array
     {
-        $fields = array_intersect_key($this->casts, $data);
+        foreach ($data as $field => $value) {
 
-        foreach ($fields as $field => $type) {
+            $cast = $this->casts[$field] ?? 'text';
 
-            $value = $data[$field];
-
-            switch ($type) {
+            switch ($cast) {
                 case 'int':
                     if (!is_int($value)) {
                         $data[$field] = (int) $value;
                     }
                     break;
-                case 'bool':
-                case 'int-bool':
-                    $data[$field] = $value ? 1 : 0;
+                case 'text':
+                    $data[$field] = Sanitizer::sanitizeText((string) $value);
                     break;
                 case 'timestamp':
                     if (!is_int($value)) {
@@ -109,6 +108,22 @@ class EntityCaster
                             throw new CastException("The provided value '{$value}' for the field '{$field}' is not a correct timestamp");
                         }
                     }
+                    break;
+                case 'html':
+                case 'html-full':
+                case 'html-basic':
+                    if ($cast === 'html') {
+                        $data[$field] = Sanitizer::sanitizeHtml((string) $value);
+                    } else {
+                        $data[$field] = Sanitizer::sanitizeHtml((string) $value, str_replace('html-', '', $cast));
+                    }
+                    break;
+                case 'key':
+                    $data[$field] = Sanitizer::sanitizeKey((string) $value);
+                    break;
+                case 'bool':
+                case 'int-bool':
+                    $data[$field] = $value ? 1 : 0;
                     break;
                 case 'float':
                     if (!is_float($value)) {
@@ -134,7 +149,7 @@ class EntityCaster
                 case 'datetime-ms':
                 case 'datetime-us':
                     if ($value instanceof \DateTimeInterface) {
-                        $data[$field] = $value->format($this->getDateFormat($type));
+                        $data[$field] = $value->format($this->getDateFormat($cast));
                     } else {
                         if (is_numeric($value)) {
                             $timestamp = (int) $value;
@@ -142,7 +157,7 @@ class EntityCaster
                             $timestamp = strtotime($value);
                         }
                         if ($timestamp > 0) {
-                            $data[$field] = date($this->getDateFormat($type), $timestamp);
+                            $data[$field] = date($this->getDateFormat($cast), $timestamp);
                         } else {
                             throw new CastException("The provided value '{$value}' for the field '{$field}' is not a correct date");
                         }
@@ -162,7 +177,7 @@ class EntityCaster
                     $data[$field] = implode(',', $value);
                     break;
                 default:
-                    $data[$field] = $this->castAs($value, $type, 'set');
+                    $data[$field] = $this->castAs($value, $cast, 'set');
             }
         }
 
@@ -187,6 +202,15 @@ class EntityCaster
                 case 'int':
                     if (!is_int($value)) {
                         $row[$field] = (int) $value;
+                    }
+                    break;
+                case 'key';
+                case 'text';
+                case 'html':
+                case 'html-full':
+                case 'html-basic':
+                    if (!is_string($value)) {
+                        $row[$field] = (string) $value;
                     }
                     break;
                 case 'bool':
