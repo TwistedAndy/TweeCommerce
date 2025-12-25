@@ -18,26 +18,24 @@ class Container implements ContainerInterface
     protected static ?Container $instance = null;
 
     /**
-     * Cache of function/method parameters to avoid slow Reflection
-     * Keys are unique identifiers for the callback (e.g. "Class::method" or Closure hash).
+     * Registered bindings (Interface => Implementation)
      */
-    protected static array $functionCache = [];
-
-    /**
-     * Cache of constructor parameters for classes to avoid slow Reflection
-     * Structure: [ 'ClassName' => [ ['name'=>'id', 'type'=>null, ...], ... ] ]
-     */
-    protected static array $parameterCache = [];
-
-    /**
-     * Stack of classes currently being built to detect recursion
-     */
-    protected array $buildStack = [];
+    protected array $bindings = [];
 
     /**
      * Cache of resolved singleton objects
      */
     protected array $instances = [];
+
+    /**
+     * Registered singletons.
+     */
+    protected array $singletons = [];
+
+    /**
+     * Stack of classes currently being built to detect recursion
+     */
+    protected array $buildStack = [];
 
     /**
      * Contextual bindings map
@@ -46,14 +44,22 @@ class Container implements ContainerInterface
     protected array $contextual = [];
 
     /**
-     * Registered bindings (Interface => Implementation)
+     * Cache of function/method parameters to avoid slow Reflection
+     * Keys are unique identifiers for the callback (e.g. "Class::method" or Closure hash).
      */
-    protected array $bindings = [];
+    protected array $functionCache = [];
 
     /**
-     * Registered singletons.
+     * Cache of constructor parameters for classes to avoid slow Reflection
+     * Structure: [ 'ClassName' => [ ['name'=>'id', 'type'=>null, ...], ... ] ]
      */
-    protected array $singletons = [];
+    protected array $parameterCache = [];
+
+    /**
+     * Cache of resolved class names to avoid repeated lookup logic.
+     * Keys are abstract aliases, values are concrete class names.
+     */
+    protected array $resolutionCache = [];
 
     /**
      * Use the container as a singleton
@@ -72,7 +78,7 @@ class Container implements ContainerInterface
     }
 
     /**
-     * Get the global container instance
+     * Get the shared container instance
      */
     public static function getInstance($config = null): Container
     {
@@ -86,13 +92,31 @@ class Container implements ContainerInterface
     }
 
     /**
-     * Reset the container instance
+     * Set the shared container instance
+     *
+     * @param Container|null $container
+     *
+     * @return void
      */
-    public static function reset(): void
+    public static function setInstance(Container $container = null): void
     {
-        static::$instance = null;
-        static::$functionCache = [];
-        static::$parameterCache = [];
+        static::$instance = $container;
+    }
+
+    /**
+     * Flush the container and all the caches
+     */
+    public function flush(): void
+    {
+        $this->bindings = [];
+        $this->instances = [];
+        $this->singletons = [];
+        $this->buildStack = [];
+        $this->contextual = [];
+
+        $this->functionCache = [];
+        $this->parameterCache = [];
+        $this->resolutionCache = [];
     }
 
     /**
@@ -127,6 +151,11 @@ class Container implements ContainerInterface
      */
     public function has(string $id): bool
     {
+        // Check Resolution Cache first
+        if (isset($this->resolutionCache[$id])) {
+            return true;
+        }
+
         // Check Singletons/Cache
         if (isset($this->instances[$id])) {
             return true;
@@ -151,16 +180,38 @@ class Container implements ContainerInterface
     }
 
     /**
+     * Determine if the given abstract type has been bound.
+     *
+     * @param string $abstract
+     *
+     * @return bool
+     */
+    public function bound(string $abstract): bool
+    {
+        return isset($this->bindings[$abstract]) or isset($this->instances[$abstract]) or isset($this->singletons[$abstract]);
+    }
+
+    /**
      * Register a binding dynamically (Used by Plugins).
      *
-     * @param string $abstract          Interface or Alias (e.g. EntityInterface::class)
-     * @param string|callable $concrete Concrete Class (e.g. Entity::class)
+     * @param string $abstract               Interface or Alias (e.g. EntityInterface::class)
+     * @param string|callable|null $concrete Concrete Class (e.g. Entity::class)
      *
-     * @param bool $shared              Whether to treat as Singleton
+     * @param bool $shared                   Whether to treat as Singleton
      */
-    public function bind(string $abstract, string|callable $concrete, bool $shared = false): void
+    public function bind(string $abstract, string|callable|null $concrete = null, bool $shared = false): void
     {
-        $this->bindings[$abstract] = $concrete;
+        // Self-binding
+        if (is_null($concrete)) {
+            $concrete = $abstract;
+        }
+
+        // Prevent infinite loops in make() alias resolution
+        if ($abstract === $concrete) {
+            unset($this->bindings[$abstract]);
+        } else {
+            $this->bindings[$abstract] = $concrete;
+        }
 
         if ($shared) {
             $this->singletons[$abstract] = true;
@@ -186,11 +237,89 @@ class Container implements ContainerInterface
     }
 
     /**
+     * Register a binding if it hasn't already been registered.
+     *
+     * @param string $abstract
+     * @param string|callable|null $concrete
+     * @param bool $shared
+     *
+     * @return void
+     */
+    public function bindIf(string $abstract, string|callable|null $concrete = null, bool $shared = false): void
+    {
+        if (!$this->bound($abstract)) {
+            $this->bind($abstract, $concrete, $shared);
+        }
+    }
+
+    /**
      * Register a shared binding (Singleton).
      */
-    public function singleton(string $abstract, string|callable $concrete): void
+    public function singleton(string $abstract, string|callable|null $concrete): void
     {
         $this->bind($abstract, $concrete, true);
+    }
+
+    /**
+     * Register a shared binding if it hasn't already been registered.
+     *
+     * @param string $abstract
+     * @param string|callable|null $concrete
+     *
+     * @return void
+     */
+    public function singletonIf(string $abstract, string|callable|null $concrete = null): void
+    {
+        if (!$this->bound($abstract)) {
+            $this->singleton($abstract, $concrete);
+        }
+    }
+
+    /**
+     * Register an existing instance as shared in the container.
+     *
+     * @template TInstance of mixed
+     *
+     * @param string $abstract
+     * @param TInstance $instance
+     *
+     * @return TInstance
+     */
+    public function instance(string $abstract, mixed $instance): mixed
+    {
+        $this->instances[$abstract] = $instance;
+
+        // Keep your existing optimization: map the concrete class to the instance
+        if (is_object($instance)) {
+            $this->instances[$instance::class] = $instance;
+
+            // Pre-fill the resolution cache since we know the class
+            $this->resolutionCache[$abstract] = $instance::class;
+        }
+
+        return $instance;
+    }
+
+    /**
+     * Remove a resolved instance from the instance cache.
+     *
+     * @param string $abstract
+     *
+     * @return void
+     */
+    public function forgetInstance(string $abstract): void
+    {
+        unset($this->instances[$abstract]);
+    }
+
+    /**
+     * Clear all of the instances from the container.
+     *
+     * @return void
+     */
+    public function forgetInstances()
+    {
+        $this->instances = [];
     }
 
     /**
@@ -221,17 +350,19 @@ class Container implements ContainerInterface
             return $this->instances[$concrete];
         }
 
-        // Detect Circular Dependencies
-        if (isset($this->buildStack[$abstract])) {
-            throw new ContainerException("Circular dependency detected: " . implode(' -> ', array_keys($this->buildStack)) . " -> $abstract");
+        // Detect circular dependencies using the normalized key
+        $stackKey = is_string($concrete) ? $concrete : $abstract;
+
+        if (isset($this->buildStack[$stackKey])) {
+            throw new ContainerException("Circular dependency detected: " . implode(' -> ', array_keys($this->buildStack)) . " -> $stackKey");
         }
 
-        $this->buildStack[$abstract] = true;
+        $this->buildStack[$stackKey] = true;
 
         try {
             $object = $this->build($concrete, $parameters);
         } finally {
-            unset($this->buildStack[$abstract]); // Always remove from stack, even if build fails
+            unset($this->buildStack[$stackKey]); // Always remove from stack, even if build fails
         }
 
         if (isset($this->singletons[$abstract]) or (is_string($concrete) and isset($this->singletons[$concrete]))) {
@@ -239,6 +370,11 @@ class Container implements ContainerInterface
             if (is_string($concrete)) {
                 $this->instances[$concrete] = $object;
             }
+        }
+
+        // Save the class name to the resolution cache
+        if (empty($parameters)) {
+            $this->resolutionCache[$abstract] = $object::class;
         }
 
         return $object;
@@ -270,11 +406,11 @@ class Container implements ContainerInterface
 
         }
 
-        if (!isset(static::$parameterCache[$concrete])) {
+        if (!isset($this->parameterCache[$concrete])) {
             $this->cacheParameters($concrete);
         }
 
-        $cachedParams = static::$parameterCache[$concrete];
+        $cachedParams = $this->parameterCache[$concrete];
 
         /**
          * If the cache says there are no constructor arguments, we can
@@ -304,9 +440,9 @@ class Container implements ContainerInterface
      * Call the given callback/method and inject its dependencies.
      * Matches Laravel's: $container->call([$object, 'method'], ['param' => 123]);
      *
-     * @param callable|string|array $callback
-     * @param array $parameters          Named parameters to override
-     * @param string|null $defaultMethod Method to call if $callback is just a class name
+     * @param callable|string|array $callback Callback
+     * @param array $parameters               Named parameters to override
+     * @param string|null $defaultMethod      Method to call if $callback is just a class name
      *
      * @return mixed
      */
@@ -332,15 +468,15 @@ class Container implements ContainerInterface
         }
 
         // Check function cache or use a reflection
-        if ($callbackKey and isset(static::$functionCache[$callbackKey])) {
-            $dependencies = static::$functionCache[$callbackKey];
+        if ($callbackKey and isset($this->functionCache[$callbackKey])) {
+            $dependencies = $this->functionCache[$callbackKey];
             $contextName = $callbackKey;
         } else {
             try {
                 if ($parsedClass) {
                     $reflector = new \ReflectionMethod($parsedClass, $parsedMethod);
                     $contextName = $callback;
-                } elseif (is_string($callback) && function_exists($callback)) {
+                } elseif (is_string($callback) and function_exists($callback)) {
                     $reflector = new \ReflectionFunction($callback);
                     $contextName = $callback;
                 } elseif (is_array($callback)) {
@@ -362,7 +498,7 @@ class Container implements ContainerInterface
             $dependencies = $this->getReflectorParameters($reflector);
 
             if ($callbackKey) {
-                static::$functionCache[$callbackKey] = $dependencies;
+                $this->functionCache[$callbackKey] = $dependencies;
             }
         }
 
@@ -389,6 +525,58 @@ class Container implements ContainerInterface
         }
 
         return call_user_func_array($callback, $instances);
+    }
+
+    /**
+     * Resolve the concrete class name for an abstract/alias
+     *
+     * @param string $abstract
+     * @param array $parameters
+     *
+     * @return string
+     */
+    public function getConcreteClass(string $abstract, array $parameters = []): string
+    {
+        // Check the class resolution cache first
+        if (isset($this->resolutionCache[$abstract])) {
+            return $this->resolutionCache[$abstract];
+        }
+
+        // If we have an object, we definitely know the class
+        if (isset($this->instances[$abstract])) {
+            $class = $this->instances[$abstract]::class;
+            $this->resolutionCache[$abstract] = $class;
+            return $class;
+        }
+
+        // Resolve Binding Chain (Alias -> Interface -> Class)
+        $concrete = $abstract;
+        $chain = [];
+
+        while (is_string($concrete) and isset($this->bindings[$concrete])) {
+            if (isset($chain[$concrete])) {
+                throw new ContainerException("Circular binding detected: " . implode(' -> ', array_keys($chain)) . " -> $concrete");
+            }
+            $chain[$concrete] = true;
+            $concrete = $this->bindings[$concrete];
+        }
+
+        // Return the string if it resolves to an actual class
+        // This prevents returning 'cache' (alias) instead of 'Config\Cache' (class)
+        if (is_string($concrete) and class_exists($concrete)) {
+            $this->resolutionCache[$abstract] = $concrete;
+            return $concrete;
+        }
+
+        // Delegate all complex resolution (Closures, CI4 Services, Factories) to make()
+        $object = $this->make($abstract, $parameters);
+
+        $class = $object::class;
+
+        // Cache the class name for next time
+        $this->resolutionCache[$abstract] = $class;
+
+        return $class;
     }
 
     /**
@@ -448,11 +636,11 @@ class Container implements ContainerInterface
         $constructor = $reflector->getConstructor();
 
         if ($constructor === null) {
-            static::$parameterCache[$className] = [];
+            $this->parameterCache[$className] = [];
             return;
         }
 
-        static::$parameterCache[$className] = $this->getReflectorParameters($constructor);
+        $this->parameterCache[$className] = $this->getReflectorParameters($constructor);
     }
 
     /**
