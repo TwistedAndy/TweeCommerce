@@ -18,6 +18,11 @@ class Container implements ContainerInterface
     protected static ?Container $instance = null;
 
     /**
+     * The registered type tags.
+     */
+    protected array $tags = [];
+
+    /**
      * Registered bindings (Interface => Implementation)
      */
     protected array $bindings = [];
@@ -128,6 +133,7 @@ class Container implements ContainerInterface
      */
     public function flush(): void
     {
+        $this->tags = [];
         $this->bindings = [];
         $this->instances = [];
         $this->singletons = [];
@@ -548,7 +554,7 @@ class Container implements ContainerInterface
     }
 
     /**
-     * Call the given callback/method and inject its dependencies.
+     * Call the given callback/method and inject its dependencies
      * Matches Laravel's: $container->call([$object, 'method'], ['param' => 123]);
      *
      * @param callable|string|array $callback Callback
@@ -682,6 +688,57 @@ class Container implements ContainerInterface
         if (is_string($concrete) and isset($this->instances[$concrete])) {
             unset($this->instances[$concrete]);
         }
+    }
+
+    /**
+     * Assign a set of tags to a given binding.
+     *
+     * @param array|string $abstracts
+     * @param array|string $tags
+     *
+     * @return void
+     */
+    public function tag(array|string $abstracts, array|string $tags): void
+    {
+        if (!is_array($tags)) {
+            $tags = array_slice(func_get_args(), 1);
+        }
+
+        if (!is_array($abstracts)) {
+            $abstracts = [$abstracts];
+        }
+
+        foreach ($tags as $tag) {
+            if (!isset($this->tags[$tag])) {
+                $this->tags[$tag] = [];
+            }
+
+            foreach ($abstracts as $abstract) {
+                if (!in_array($abstract, $this->tags[$tag])) {
+                    $this->tags[$tag][] = $abstract;
+                }
+            }
+        }
+    }
+
+    /**
+     * Return an array of instantiated objects for a tag
+     *
+     * @param string $tag
+     *
+     * @return array
+     */
+    public function tagged(string $tag): array
+    {
+        $results = [];
+
+        if (isset($this->tags[$tag])) {
+            foreach ($this->tags[$tag] as $abstract) {
+                $results[] = $this->make($abstract);
+            }
+        }
+
+        return $results;
     }
 
     /**

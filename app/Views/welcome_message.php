@@ -292,6 +292,104 @@
 
 </div>
 
+<?php
+
+use App\Core\Container;
+
+// 1. Setup Dummy Classes
+class Leaf
+{
+}
+
+
+class Branch
+{
+    public function __construct(public Leaf $leaf)
+    {
+    }
+}
+
+
+class Tree
+{
+    public function __construct(public Branch $branch)
+    {
+    }
+}
+
+
+// 2. Initialize
+$container = Container::getInstance();
+$iterations = 10000;
+
+echo "Starting Benchmark ($iterations iterations)...\n";
+echo "PHP Version: " . phpversion() . "\n\n";
+
+// --- TEST 1: Transient Resolution (Baseline) ---
+$container->flush();
+$start = microtime(true);
+$startMem = memory_get_usage();
+
+for ($i = 0; $i < $iterations; $i++) {
+    $container->make(Tree::class);
+}
+
+$end = microtime(true);
+$endMem = memory_get_usage();
+$time1 = $end - $start;
+
+echo "1. Transient Resolution (Baseline):\n";
+echo "   Time:   " . number_format($time1, 4) . " s\n";
+echo "   Speed:  " . number_format($iterations / $time1) . " ops/sec\n";
+echo "   Memory: " . number_format(($endMem - $startMem) / 1024 / 1024, 2) . " MB\n\n";
+
+
+// --- TEST 2: Resolving Callbacks (Impact Check) ---
+$container->flush();
+$callbackCount = 0;
+
+// Register a callback to fire every time Tree is created
+$container->resolving(Tree::class, function ($object, $app) use (&$callbackCount) {
+    $callbackCount++;
+});
+
+$start = microtime(true);
+
+for ($i = 0; $i < $iterations; $i++) {
+    $container->make(Tree::class);
+}
+
+$end = microtime(true);
+$time2 = $end - $start;
+
+echo "2. Transient with Resolving Callback:\n";
+echo "   Time:   " . number_format($time2, 4) . " s\n";
+echo "   Speed:  " . number_format($iterations / $time2) . " ops/sec\n";
+echo "    overhead: " . number_format(($time2 - $time1) * 1000, 2) . " ms total\n";
+echo "   Verified: " . ($callbackCount === $iterations ? "✅ Callbacks fired $callbackCount times" : "❌ Failed ($callbackCount)") . "\n\n";
+
+
+// --- TEST 3: Singleton Resolution (Cached) ---
+$container->flush();
+$container->singleton(Tree::class, Tree::class);
+$container->make(Tree::class); // Prime cache
+
+$start = microtime(true);
+
+for ($i = 0; $i < $iterations; $i++) {
+    $container->make(Tree::class);
+}
+
+$end = microtime(true);
+$time3 = $end - $start;
+
+echo "3. Singleton Resolution (Cached):\n";
+echo "   Time:   " . number_format($time3, 4) . " s\n";
+echo "   Speed:  " . number_format($iterations / $time3) . " ops/sec\n";
+
+
+?>
+
 <!-- FOOTER: DEBUG INFO + COPYRIGHTS -->
 
 <footer>
