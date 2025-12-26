@@ -46,7 +46,7 @@ class Sanitizer
     /**
      * Attribute protocols pattern
      */
-    public static string $attributeProtocols = '';
+    protected static string $protocolsCache = '';
 
     /**
      * Sanitize a key or a slug
@@ -406,13 +406,13 @@ class Sanitizer
         } while ($count > 0);
 
         // Build spaced-out patterns for all dangerous keywords
-        if (static::$attributeProtocols === '') {
+        if (static::$protocolsCache === '') {
             $protocols = [];
             $keywords = ['javascript', 'vbscript', 'data', 'livescript', 'behavior', 'expression', 'import'];
             foreach ($keywords as $keyword) {
                 $protocols[] = implode('([\s\0\x09\x0A\x0D]|&#[xX]?[0-9a-fA-F]+;?|\/\*.*?\*\/)*', str_split($keyword));
             }
-            static::$attributeProtocols = '(' . implode('|', $protocols) . ')';
+            static::$protocolsCache = '(' . implode('|', $protocols) . ')';
         }
 
         $patterns = [
@@ -420,7 +420,7 @@ class Sanitizer
             '/(<[a-z][a-z0-9]*\b[^>]*?)\K([\s\/]+(on[a-z]+|formaction|classid|dynsrc|lowsrc)\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+))/siu',
 
             // Check attributes, which may have a link
-            '/(<[a-z][a-z0-9]*\b[^>]*?)\K([\s\/]+(href|src|style|action|data|formaction|background|cite|poster|xlink:href)\s*=\s*("[^"]*?(' . static::$attributeProtocols . ')[^"]*?"|\'[^\']*?(' . static::$attributeProtocols . ')[^\']*?\'|[^\s>]*?(' . static::$attributeProtocols . ')[^\s>]*))/siu',
+            '/(<[a-z][a-z0-9]*\b[^>]*?)\K([\s\/]+(href|src|style|action|data|formaction|background|cite|poster|xlink:href)\s*=\s*("[^"]*?(' . static::$protocolsCache . ')[^"]*?"|\'[^\']*?(' . static::$protocolsCache . ')[^\']*?\'|[^\s>]*?(' . static::$protocolsCache . ')[^\s>]*))/siu',
 
             // Check malformed attributes
             '/(<[a-z][a-z0-9]*\b[^>]*?)\K([\s\/]+[a-z0-9_-]+\s*=\s*("[^"]*"|\'[^\']*\')[^\s>]+)/siu',
