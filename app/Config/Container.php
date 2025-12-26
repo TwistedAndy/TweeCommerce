@@ -65,61 +65,78 @@ class Container extends BaseConfig
         \CodeIgniter\Email\Email::class                     => 'email',
 
         // Application Bindings
-        \App\Entity\EntityInterface::class                  => \App\Entity\Entity::class,
+        \App\Core\Entity\EntityInterface::class             => \App\Core\Entity\Entity::class,
     ];
 
-
     /**
-     * List of services that should be shared (Singletons).
+     * List of services preserved for the entire life of the PHP process
      */
     public array $singletons = [
         // Framework Bindings
+        \CodeIgniter\Log\Logger::class,
+        \CodeIgniter\Debug\Timer::class,
+        \CodeIgniter\Debug\Toolbar::class,
+        \CodeIgniter\Debug\Iterator::class,
+        \CodeIgniter\Debug\Exceptions::class,
+        \CodeIgniter\Pager\PagerInterface::class,
+        \CodeIgniter\Database\ConnectionInterface::class,
+        \CodeIgniter\Database\MigrationRunner::class,
+        \CodeIgniter\Cache\CacheInterface::class,
+        \CodeIgniter\Cache\ResponseCache::class,
+        \CodeIgniter\Security\SecurityInterface::class,
+        \CodeIgniter\Throttle\ThrottlerInterface::class,
+        \CodeIgniter\Images\ImageHandlerInterface::class,
+        \CodeIgniter\Typography\Typography::class,
+        \CodeIgniter\View\RendererInterface::class,
+        \CodeIgniter\View\Parser::class,
+        \CodeIgniter\View\View::class,
+        \CodeIgniter\View\Cell::class,
+        \CodeIgniter\Email\Email::class,
+        \CodeIgniter\Format\Format::class,
+
+        // Application Classes
+        \App\Core\Container\Container::class
+    ];
+
+    /**
+     * Services that act as singletons but are flushed after every request
+     */
+    public array $scoped = [
+        // Framework classes to be recreated between requests
         \CodeIgniter\HTTP\ContentSecurityPolicy::class,
-        \CodeIgniter\HTTP\RequestInterface::class,
         \CodeIgniter\HTTP\ResponseInterface::class,
         \CodeIgniter\HTTP\RedirectResponse::class,
+        \CodeIgniter\HTTP\RequestInterface::class,
         \CodeIgniter\HTTP\IncomingRequest::class,
         \CodeIgniter\HTTP\SiteURIFactory::class,
         \CodeIgniter\HTTP\CURLRequest::class,
         \CodeIgniter\HTTP\CLIRequest::class,
         \CodeIgniter\HTTP\Negotiate::class,
         \CodeIgniter\HTTP\URI::class,
-
         \CodeIgniter\CodeIgniter::class,
         \CodeIgniter\CLI\Commands::class,
+        \CodeIgniter\Validation\ValidationInterface::class,
         \CodeIgniter\Router\RouteCollectionInterface::class,
         \CodeIgniter\Router\RouterInterface::class,
         \CodeIgniter\Filters\FilterInterface::class,
         \CodeIgniter\Session\SessionInterface::class,
-
-        \CodeIgniter\Pager\PagerInterface::class,
-        \CodeIgniter\Database\ConnectionInterface::class,
-        \CodeIgniter\Database\MigrationRunner::class,
-        \CodeIgniter\Cache\CacheInterface::class,
-        \CodeIgniter\Cache\ResponseCache::class,
-
-        \CodeIgniter\Log\Logger::class,
-        \CodeIgniter\Debug\Timer::class,
-        \CodeIgniter\Debug\Toolbar::class,
-        \CodeIgniter\Debug\Iterator::class,
-        \CodeIgniter\Debug\Exceptions::class,
-
-        \CodeIgniter\Security\SecurityInterface::class,
-        \CodeIgniter\Throttle\ThrottlerInterface::class,
-        \CodeIgniter\Validation\ValidationInterface::class,
-
-        \CodeIgniter\Images\ImageHandlerInterface::class,
-        \CodeIgniter\Typography\Typography::class,
         \CodeIgniter\Language\Language::class,
-        \CodeIgniter\Format\Format::class,
-        \CodeIgniter\View\RendererInterface::class,
-        \CodeIgniter\View\View::class,
-        \CodeIgniter\View\Parser::class,
-        \CodeIgniter\View\Cell::class,
-        \CodeIgniter\Email\Email::class,
 
         // Application Classes
+        \App\Core\Actions\ActionsService::class,
     ];
+
+    /**
+     * Group multiple services under one tag
+     */
+    public array $tags = [
+        // 'reports' => [\App\Actions\Pdf::class, \App\Actions\Excel::class],
+    ];
+
+    /**
+     * Decorate (modify) objects after they are instantiated.
+     */
+    public array $extenders = [];
 
     public function __construct()
     {
@@ -128,6 +145,16 @@ class Container extends BaseConfig
         $this->bindings[\CodeIgniter\Database\ConnectionInterface::class] = function () {
             return \Config\Database::connect();
         };
+
+        /*
+        $this->extenders[\App\Core\Actions\ActionsService::class] = [
+            function ($service, $container) {
+                // Logic to wrap the service
+                return $service;
+            }
+        ];
+        */
+
     }
 
 }

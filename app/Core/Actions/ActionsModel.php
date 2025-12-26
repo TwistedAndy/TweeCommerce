@@ -1,10 +1,10 @@
 <?php
 
-namespace App\Models;
+namespace App\Core\Actions;
 
 use CodeIgniter\Model;
 
-class ActionModel extends Model
+class ActionsModel extends Model
 {
     protected $table = 'actions';
     protected $primaryKey = 'id';
@@ -82,14 +82,12 @@ class ActionModel extends Model
 
         $this->db->transStart();
 
-        // 1. Update Status
+        // Update Status
         $this->whereIn('id', $ids)
              ->set(['status' => self::STATUS_COMPLETED, 'updated_at' => time()])
              ->update();
 
-        // [REMOVED] delete from action_claims (Table does not exist)
-
-        // 2. Logs
+        // Logs
         $logs = [];
         foreach ($ids as $id) {
             $logs[] = [

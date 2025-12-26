@@ -2,11 +2,9 @@
 
 namespace App\Controllers;
 
-use App\Core\Container;
-
 class ActionController extends BaseController
 {
-    public function work(\App\Services\ActionService $service)
+    public function work(\App\Core\Actions\ActionsService $service)
     {
         $secret = $this->request->getHeaderLine('X-Queue-Secret');
 

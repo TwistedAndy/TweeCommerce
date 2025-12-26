@@ -14,7 +14,7 @@
  * @see: https://codeigniter.com/user_guide/extending/common.html
  */
 
-use App\Core\Container;
+use App\Core\Container\Container;
 
 if (!function_exists('app')) {
     /**

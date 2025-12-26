@@ -1,6 +1,6 @@
 <?php
 
-use \App\Libraries\Escaper;
+use App\Libraries\Escaper;
 
 if (!function_exists('esc_html')) {
     /**

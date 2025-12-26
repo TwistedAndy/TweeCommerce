@@ -1,6 +1,6 @@
 <?php
 
-use \App\Libraries\Sanitizer;
+use App\Libraries\Sanitizer;
 
 if (!function_exists('sanitize_key')) {
     /**

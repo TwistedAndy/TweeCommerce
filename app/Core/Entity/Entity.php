@@ -1,10 +1,9 @@
 <?php
 
-namespace App\Entity;
+namespace App\Core\Entity;
 
 use App\Libraries\Escaper;
 use CodeIgniter\Exceptions\BadMethodCallException;
-
 use JsonSerializable;
 
 /**
@@ -177,7 +176,7 @@ class Entity implements EntityInterface, JsonSerializable
 
         if (!isset(static::$resolvedMethods[$class])) {
 
-            self::$entityCasters[$class] = app(\App\Entity\EntityCaster::class, [
+            self::$entityCasters[$class] = app(\App\Core\Entity\EntityCaster::class, [
                 static::getEntityCasts(),
                 static::getEntityCastHandlers()
             ]);

@@ -1,14 +1,12 @@
 <?php
 
-namespace App\Core;
+namespace App\Core\Container;
 
-use App\Exceptions\ContainerException;
-use App\Exceptions\NotFoundException;
 use Psr\Container\ContainerInterface;
+use ReflectionClass;
+use ReflectionException;
 use ReflectionFunctionAbstract;
 use ReflectionNamedType;
-use ReflectionException;
-use ReflectionClass;
 
 class Container implements ContainerInterface
 {
@@ -94,11 +92,49 @@ class Container implements ContainerInterface
     private function __construct($config = null)
     {
         if (is_object($config)) {
-            $this->bindings = $config->bindings ?? [];
-            $this->singletons = array_fill_keys($config->singletons ?? [], true);
-        } elseif (is_array($config)) {
-            $this->bindings = $config['bindings'] ?? [];
-            $this->singletons = array_fill_keys($config['singletons'] ?? [], true);
+            $config = (array) $config;
+        }
+
+        if (!is_array($config)) {
+            return;
+        }
+
+        // Process standard bindings
+        $this->bindings = $config['bindings'] ?? [];
+
+        // Process Singletons (Convert list to lookup keys)
+        if (isset($config['singletons']) and is_array($config['singletons'])) {
+            $this->singletons = array_fill_keys($config['singletons'], true);
+        }
+
+        // Process Scoped Definitions (Convert list to lookup keys)
+        if (isset($config['scoped']) and is_array($config['scoped'])) {
+            $this->scopedDefinitions = array_fill_keys($config['scoped'], true);
+        }
+
+        // Ensure no service is both a Singleton and Scoped
+        $overlap = array_intersect_key($this->singletons, $this->scopedDefinitions);
+        if (!empty($overlap)) {
+            $keys = implode(', ', array_keys($overlap));
+            throw new ContainerException("Conflict: Services cannot be both Singleton and Scoped: [{$keys}]");
+        }
+
+        // Process Tags
+        if (isset($config['tags']) and is_array($config['tags'])) {
+            foreach ($config['tags'] as $tag => $abstracts) {
+                $this->tag($abstracts, $tag);
+            }
+        }
+
+        // Process Extensions
+        if (isset($config['extenders']) and is_array($config['extenders'])) {
+            foreach ($config['extenders'] as $abstract => $closures) {
+                // Normalize to array if only one closure is provided
+                $closures = is_array($closures) ? $closures : [$closures];
+                foreach ($closures as $closure) {
+                    $this->extend($abstract, $closure);
+                }
+            }
         }
     }
 

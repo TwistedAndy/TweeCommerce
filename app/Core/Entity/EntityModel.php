@@ -1,14 +1,14 @@
 <?php
 
-namespace App\Entity;
+namespace App\Core\Entity;
 
-use App\Exceptions\ContainerException;
+use App\Core\Container\ContainerException;
 use App\Exceptions\ValidationException;
-use CodeIgniter\Exceptions\InvalidArgumentException;
-use CodeIgniter\Validation\ValidationInterface;
-use CodeIgniter\Database\Exceptions\DataException;
 use CodeIgniter\Database\ConnectionInterface;
+use CodeIgniter\Database\Exceptions\DataException;
+use CodeIgniter\Exceptions\InvalidArgumentException;
 use CodeIgniter\Model;
+use CodeIgniter\Validation\ValidationInterface;
 use ReflectionException;
 
 class EntityModel extends Model

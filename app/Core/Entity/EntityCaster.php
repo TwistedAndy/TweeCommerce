@@ -1,10 +1,9 @@
 <?php
 
-namespace App\Entity;
+namespace App\Core\Entity;
 
 use App\Libraries\Sanitizer;
-
-use CodeIgniter\DataCaster\Exceptions\CastException;
+use CodeIgniter\Database\BaseConnection;
 use CodeIgniter\DataCaster\Cast\ArrayCast;
 use CodeIgniter\DataCaster\Cast\BooleanCast;
 use CodeIgniter\DataCaster\Cast\CSVCast;
@@ -15,7 +14,7 @@ use CodeIgniter\DataCaster\Cast\IntegerCast;
 use CodeIgniter\DataCaster\Cast\JsonCast;
 use CodeIgniter\DataCaster\Cast\TimestampCast;
 use CodeIgniter\DataCaster\Cast\URICast;
-use CodeIgniter\Database\BaseConnection;
+use CodeIgniter\DataCaster\Exceptions\CastException;
 use CodeIgniter\I18n\Time;
 use JsonException;
 

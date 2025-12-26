@@ -294,7 +294,7 @@
 
 <?php
 
-use App\Core\Container;
+use App\Core\Container\Container;
 
 // 1. Setup Dummy Classes
 class Leaf

@@ -1,23 +1,21 @@
 <?php
 
-namespace App\Services;
+namespace App\Core\Actions;
 
-use App\Core\Container;
-use App\Models\ActionModel;
-use App\Exceptions\ActionException;
+use App\Core\Container\Container;
 use CodeIgniter\Events\Events;
 
-class ActionService
+class ActionsService
 {
     protected array $instantCallbacks = [];
     protected array $deferredCallbacks = [];
     protected array $deferredBuffer = [];
-    protected ActionModel $actionModel;
+    protected ActionsModel $actionModel;
     protected Container $container;
     protected bool $hasPendingJobs = false;
     protected static bool $workerTriggered = false;
 
-    public function __construct(ActionModel $actionModel, Container $container)
+    public function __construct(ActionsModel $actionModel, Container $container)
     {
         $this->actionModel = $actionModel;
         $this->container = $container;
@@ -35,7 +33,7 @@ class ActionService
         $store = $instant ? 'instantCallbacks' : 'deferredCallbacks';
 
         if (strlen($action) > 191) {
-            throw new ActionException("Action name '{$action}' too long.");
+            throw new ActionsException("Action name '{$action}' too long.");
         }
 
         if (!isset($this->{$store}[$action])) {
@@ -71,7 +69,7 @@ class ActionService
                     if ($signature) {
                         $this->schedule($action, $signature, $parameters, $priority, time());
                     } else {
-                        throw new ActionException("Unable to generate signature for $action");
+                        throw new ActionsException("Unable to generate signature for $action");
                     }
                 }
             }
@@ -108,7 +106,7 @@ class ActionService
             // If it's a string, ensure it is valid
             if (is_string($recurringTime) && !is_numeric($recurringTime)) {
                 if (strtotime($recurringTime) === false) {
-                    throw new ActionException("Invalid recurring string: $recurringTime");
+                    throw new ActionsException("Invalid recurring string: $recurringTime");
                 }
             }
         } else {
@@ -120,7 +118,7 @@ class ActionService
             'action'       => $action,
             'callback'     => $callbackKey,
             'payload'      => json_encode($args),
-            'status'       => ActionModel::STATUS_PENDING,
+            'status'       => ActionsModel::STATUS_PENDING,
             'priority'     => $priority,
             'scheduled_at' => $scheduledAt,
             'recurring'    => $recurringTime, // Store raw string or int
@@ -204,7 +202,7 @@ class ActionService
                 $callback = $this->findCallback($action, $callbackKey);
 
                 if (empty($callback)) {
-                    throw new ActionException("Listener signature not found: " . $callbackKey);
+                    throw new ActionsException("Listener signature not found: " . $callbackKey);
                 }
 
                 $this->container->call($callback, $args);

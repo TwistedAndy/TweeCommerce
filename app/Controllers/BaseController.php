@@ -2,17 +2,14 @@
 
 namespace App\Controllers;
 
+use App\Core\Container\Container;
+use App\Exceptions\ValidationException;
 use CodeIgniter\Controller;
 use CodeIgniter\HTTP\CLIRequest;
 use CodeIgniter\HTTP\IncomingRequest;
 use CodeIgniter\HTTP\RequestInterface;
 use CodeIgniter\HTTP\ResponseInterface;
-use CodeIgniter\Exceptions\PageNotFoundException;
-
-use \Psr\Log\LoggerInterface;
-
-use \App\Core\Container;
-use \App\Exceptions\ValidationException;
+use Psr\Log\LoggerInterface;
 
 /**
  * Class BaseController
