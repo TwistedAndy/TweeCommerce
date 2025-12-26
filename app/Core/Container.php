@@ -721,6 +721,39 @@ class Container implements ContainerInterface
                 continue;
             }
 
+            // Variadic check must run before Class/Positional checks because it consumes multiple arguments.
+            if ($dep['variadic']) {
+
+                // Manual Parameters passed to make(). If the user manually provided args, consume ALL remaining positional args.
+                if (array_key_exists($numericIndex, $parameters)) {
+                    while (array_key_exists($numericIndex, $parameters)) {
+                        $results[] = $parameters[$numericIndex];
+                        $numericIndex++;
+                    }
+                    continue;
+                }
+
+                // Contextual Array Binding. Allows binding an array of services: $container->bindWhen(..., [ServiceA::class, ServiceB::class])
+                if ($type !== null) {
+                    $lookupTypes = is_array($type) ? $type : [$type];
+
+                    foreach ($lookupTypes as $candidateType) {
+                        if (isset($this->contextual[$className][$candidateType])) {
+                            $bound = $this->contextual[$className][$candidateType];
+
+                            if (is_array($bound)) {
+                                foreach ($bound as $item) {
+                                    $results[] = is_string($item) ? $this->make($item) : $this->build($item, []);
+                                }
+                                continue 2; // Found a match, skip to next dependency
+                            }
+                        }
+                    }
+                }
+
+                continue;
+            }
+
             // Class Dependency (Auto-wiring)
             if ($type !== null) {
 
@@ -817,15 +850,6 @@ class Container implements ContainerInterface
             if (array_key_exists($numericIndex, $parameters)) {
                 $results[] = $parameters[$numericIndex];
                 $numericIndex++; // Move cursor to the next argument
-                continue;
-            }
-
-            // Variadic (Consume remaining)
-            if ($dep['variadic']) {
-                while (array_key_exists($numericIndex, $parameters)) {
-                    $results[] = $parameters[$numericIndex];
-                    $numericIndex++;
-                }
                 continue;
             }
 
