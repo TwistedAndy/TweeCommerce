@@ -67,6 +67,16 @@ class Container implements ContainerInterface
     protected array $resolvingCallbacks = [];
 
     /**
+     * Scoped bindings are processed as singletons that can be flushed
+     */
+    protected array $scopedDefinitions = [];
+
+    /**
+     * The keys of resolved scoped instances that need to be flushed.
+     */
+    protected array $scopedInstances = [];
+
+    /**
      * Use the container as a singleton
      *
      * @param object|array|null $config
@@ -118,6 +128,9 @@ class Container implements ContainerInterface
         $this->singletons = [];
         $this->buildStack = [];
         $this->contextual = [];
+
+        $this->scopedInstances = [];
+        $this->scopedDefinitions = [];
 
         $this->functionCache = [];
         $this->parameterCache = [];
@@ -283,6 +296,42 @@ class Container implements ContainerInterface
     }
 
     /**
+     * Register a scoped binding in the container.
+     * Scoped instances are singletons that can be flushed (e.g., per request).
+     *
+     * @param string $abstract
+     * @param string|callable|null $concrete
+     *
+     * @return void
+     */
+    public function scoped(string $abstract, string|callable|null $concrete = null): void
+    {
+        if (is_null($concrete)) {
+            $concrete = $abstract;
+        }
+
+        // Bind it normally (not as a global singleton)
+        $this->bind($abstract, $concrete, false);
+
+        // Mark it as scoped
+        $this->scopedDefinitions[$abstract] = true;
+
+        if (is_string($concrete)) {
+            $this->scopedDefinitions[$concrete] = true;
+        }
+    }
+
+    /**
+     * Register a scoped binding if it hasn't already been registered.
+     */
+    public function scopedIf(string $abstract, string|callable|null $concrete = null): void
+    {
+        if (!$this->bound($abstract)) {
+            $this->scoped($abstract, $concrete);
+        }
+    }
+
+    /**
      * Register an existing instance as shared in the container.
      *
      * @template TInstance of mixed
@@ -330,6 +379,21 @@ class Container implements ContainerInterface
     }
 
     /**
+     * Flush all scoped instances from the container
+     *
+     * @return void
+     */
+    public function forgetScopedInstances(): void
+    {
+        foreach ($this->scopedInstances as $abstract) {
+            unset($this->instances[$abstract]);
+        }
+
+        // Reset the tracker
+        $this->scopedInstances = [];
+    }
+
+    /**
      * Resolve a dependency.
      */
     public function make(string $abstract, array $parameters = [])
@@ -372,10 +436,21 @@ class Container implements ContainerInterface
             unset($this->buildStack[$stackKey]); // Always remove from stack, even if build fails
         }
 
-        if (isset($this->singletons[$abstract]) or (is_string($concrete) and isset($this->singletons[$concrete]))) {
+        // Check if Shared (Singleton) OR Scoped
+        $isSingleton = (isset($this->singletons[$abstract]) or (is_string($concrete) and isset($this->singletons[$concrete])));
+        $isScoped = (isset($this->scopedDefinitions[$abstract]) or (is_string($concrete) and isset($this->scopedDefinitions[$concrete])));
+
+        if ($isSingleton or $isScoped) {
             $this->instances[$abstract] = $object;
             if (is_string($concrete)) {
                 $this->instances[$concrete] = $object;
+            }
+
+            if ($isScoped) {
+                $this->scopedInstances[] = $abstract;
+                if (is_string($concrete) and $concrete !== $abstract) {
+                    $this->scopedInstances[] = $concrete;
+                }
             }
         }
 
