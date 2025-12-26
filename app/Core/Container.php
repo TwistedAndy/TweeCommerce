@@ -28,9 +28,14 @@ class Container implements ContainerInterface
     protected array $instances = [];
 
     /**
-     * Registered singletons.
+     * Registered singletons
      */
     protected array $singletons = [];
+
+    /**
+     * The extension closures for services
+     */
+    protected array $extenders = [];
 
     /**
      * Stack of classes currently being built to detect recursion
@@ -436,6 +441,14 @@ class Container implements ContainerInterface
             unset($this->buildStack[$stackKey]); // Always remove from stack, even if build fails
         }
 
+        // Apply Extenders (Decorators) to swap the instance (e.g. wrapping in a Proxy)
+        if (isset($this->extenders[$abstract])) {
+            foreach ($this->extenders[$abstract] as $extender) {
+                // The extender receives the current object and returns a NEW one
+                $object = $extender($object, $this);
+            }
+        }
+
         // Check if Shared (Singleton) OR Scoped
         $isSingleton = (isset($this->singletons[$abstract]) or (is_string($concrete) and isset($this->singletons[$concrete])));
         $isScoped = (isset($this->scopedDefinitions[$abstract]) or (is_string($concrete) and isset($this->scopedDefinitions[$concrete])));
@@ -631,6 +644,44 @@ class Container implements ContainerInterface
         }
 
         return call_user_func_array($callback, $instances);
+    }
+
+    /**
+     * Extend (decorate) an abstract type in the container
+     *
+     * @param string $abstract
+     * @param callable $closure
+     *
+     * @return void
+     */
+    public function extend(string $abstract, callable $closure): void
+    {
+        if (!isset($this->extenders[$abstract])) {
+            $this->extenders[$abstract] = [];
+        }
+
+        $this->extenders[$abstract][] = $closure;
+
+        // Forget already created singletons, so they will be rebuilt next time
+        $concrete = $abstract;
+        while (is_string($concrete) and isset($this->bindings[$concrete])) {
+            $concrete = $this->bindings[$concrete];
+        }
+
+        // Clear the abstract singleton
+        if (isset($this->instances[$abstract])) {
+
+            if (is_object($this->instances[$abstract])) {
+                unset($this->instances[$this->instances[$abstract]::class]);
+            }
+
+            unset($this->instances[$abstract]);
+        }
+
+        // Clear the concrete singleton
+        if (is_string($concrete) and isset($this->instances[$concrete])) {
+            unset($this->instances[$concrete]);
+        }
     }
 
     /**
