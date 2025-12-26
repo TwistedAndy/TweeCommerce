@@ -142,6 +142,8 @@ class Container implements ContainerInterface
 
         try {
             return $this->make($id);
+        } catch (NotFoundException $e) {
+            throw $e;
         } catch (\Throwable $e) {
             throw new ContainerException("Error while resolving entry '$id': " . $e->getMessage(), 0, $e);
         }
@@ -487,6 +489,11 @@ class Container implements ContainerInterface
             }
         } else {
             $callbackKey = $this->getCallbackKey($callback);
+
+            if (is_array($callback) and isset($callback[0]) and is_string($callback[0])) {
+                $parsedClass = $callback[0];
+                $parsedMethod = $callback[1] ?? '__invoke';
+            }
         }
 
         // Check function cache or use a reflection
@@ -717,30 +724,93 @@ class Container implements ContainerInterface
             // Class Dependency (Auto-wiring)
             if ($type !== null) {
 
-                // If the passed parameter at $numericIndex is an instance of the required type, use it!
-                if (array_key_exists($numericIndex, $parameters) and $parameters[$numericIndex] instanceof $type) {
-                    $results[] = $parameters[$numericIndex];
-                    $numericIndex++;
+                if (is_string($type)) {
+                    // If the passed parameter at $numericIndex is an instance of the required type, use it!
+                    if (array_key_exists($numericIndex, $parameters) and ($parameters[$numericIndex] instanceof $type or $dep['builtin'])) {
+                        $results[] = $parameters[$numericIndex];
+                        $numericIndex++;
+                        continue;
+                    }
+
+                    // Contextual Binding
+                    if (isset($this->contextual[$className]) and isset($this->contextual[$className][$type])) {
+                        $concrete = $this->contextual[$className][$type];
+                        $results[] = is_string($concrete) ? $this->make($concrete) : $this->build($concrete, []);
+                        continue;
+                    }
+
+                    // Resolution
+                    try {
+                        $results[] = $this->make($type);
+                    } catch (ContainerException $e) {
+                        if ($dep['nullable']) {
+                            $results[] = null;
+                        } else {
+                            throw $e;
+                        }
+                    }
                     continue;
                 }
 
-                if (isset($this->contextual[$className]) and isset($this->contextual[$className][$type])) {
-                    $concrete = $this->contextual[$className][$type];
+                // Process multiple union types (e.g. Logger|FileLogger)
+                if (is_array($type)) {
+                    $resolved = false;
 
-                    // Pass empty array [] to ensure dependencies are isolated from the parent's parameters
-                    $results[] = is_string($concrete) ? $this->make($concrete) : $this->build($concrete, []);
-                    continue;
-                }
-                try {
-                    $results[] = $this->make($type);
-                } catch (ContainerException $e) {
+                    // Check passed parameters against ANY of the union types
+                    if (array_key_exists($numericIndex, $parameters)) {
+                        $passed = $parameters[$numericIndex];
+                        $isMatch = $dep['builtin'];
+
+                        if (!$isMatch) {
+                            foreach ($type as $candidate) {
+                                if ($passed instanceof $candidate) {
+                                    $isMatch = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if ($isMatch) {
+                            $results[] = $passed;
+                            $numericIndex++;
+                            $resolved = true;
+                        }
+                    }
+
+                    // Attempt resolution of each candidate
+                    if (!$resolved) {
+                        foreach ($type as $candidate) {
+                            // Check Contextual
+                            if (isset($this->contextual[$className][$candidate])) {
+                                $concrete = $this->contextual[$className][$candidate];
+                                $results[] = is_string($concrete) ? $this->make($concrete) : $this->build($concrete, []);
+                                $resolved = true;
+                                break;
+                            }
+
+                            // Try to Make
+                            try {
+                                $results[] = $this->make($candidate);
+                                $resolved = true;
+                                break;
+                            } catch (ContainerException $e) {
+                                // Continue to next candidate
+                            }
+                        }
+                    }
+
+                    if ($resolved) {
+                        continue;
+                    }
+
+                    // Fail or Nullable
                     if ($dep['nullable']) {
                         $results[] = null;
-                    } else {
-                        throw $e;
+                        continue;
                     }
+
+                    throw new ContainerException("Unresolvable dependency: Parameter '\${$name}' in '{$className}' could not be resolved. Tried: " . implode('|', $type));
                 }
-                continue;
             }
 
             // Positional Parameters
@@ -784,11 +854,45 @@ class Container implements ContainerInterface
 
         foreach ($reflector->getParameters() as $param) {
             $type = $param->getType();
+            $resolvedType = null;
+            $hasBuiltin = false;
+
+            if ($type instanceof ReflectionNamedType) {
+                // Standard: Single Type
+                if (!$type->isBuiltin()) {
+                    $resolvedType = $type->getName();
+                } else {
+                    $hasBuiltin = true;
+                }
+            } elseif ($type instanceof \ReflectionUnionType) {
+                // Union: Collect all valid classes
+                $candidates = [];
+                foreach ($type->getTypes() as $unionType) {
+                    if ($unionType instanceof ReflectionNamedType) {
+                        if (!$unionType->isBuiltin()) {
+                            $candidates[] = $unionType->getName();
+                        } else {
+                            $hasBuiltin = true;
+                        }
+                    }
+                }
+
+                $count = count($candidates);
+
+                // If there's only one union type available, store it as a string
+                if ($count === 1) {
+                    $resolvedType = $candidates[0];
+                } elseif ($count > 1) {
+                    $resolvedType = $candidates;
+                }
+            }
+
             $params[] = [
                 'name'        => $param->getName(),
-                'type_name'   => ($type instanceof ReflectionNamedType and !$type->isBuiltin()) ? $type->getName() : null,
+                'type_name'   => $resolvedType,
                 'is_optional' => $param->isDefaultValueAvailable(),
                 'default'     => $param->isDefaultValueAvailable() ? $param->getDefaultValue() : null,
+                'builtin'     => $hasBuiltin,
                 'nullable'    => $param->allowsNull(),
                 'variadic'    => $param->isVariadic(),
             ];
