@@ -91,6 +91,9 @@ class Container implements ContainerInterface
      */
     private function __construct($config = null)
     {
+        // Immediately register this instance to prevent re-instantiation attempts
+        $this->instances[static::class] = $this;
+
         if (is_object($config)) {
             $config = (array) $config;
         }
@@ -159,7 +162,7 @@ class Container implements ContainerInterface
      *
      * @return void
      */
-    public static function setInstance(Container $container = null): void
+    public static function setInstance(?Container $container = null): void
     {
         static::$instance = $container;
     }
@@ -432,7 +435,7 @@ class Container implements ContainerInterface
      */
     public function forgetScopedInstances(): void
     {
-        foreach ($this->scopedInstances as $abstract) {
+        foreach ($this->scopedInstances as $abstract => $status) {
             unset($this->instances[$abstract]);
         }
 
@@ -502,9 +505,9 @@ class Container implements ContainerInterface
             }
 
             if ($isScoped) {
-                $this->scopedInstances[] = $abstract;
-                if (is_string($concrete) and $concrete !== $abstract) {
-                    $this->scopedInstances[] = $concrete;
+                $this->scopedInstances[$abstract] = true;
+                if (is_string($concrete)) {
+                    $this->scopedInstances[$concrete] = true;
                 }
             }
         }
@@ -539,7 +542,11 @@ class Container implements ContainerInterface
     protected function build(string|callable $concrete, array $parameters): object
     {
         if (is_callable($concrete)) {
-            return $concrete($this, $parameters);
+            if ($concrete instanceof \Closure) {
+                return $concrete($this, $parameters);
+            } else {
+                return $concrete(...$parameters);
+            }
         }
 
         if (!class_exists($concrete)) {
@@ -862,7 +869,6 @@ class Container implements ContainerInterface
                 throw new ContainerException('Invalid callback arguments: ' . serialize($callback));
             }
         } elseif ($callback instanceof \Closure) {
-
             try {
                 $reflector = new \ReflectionFunction($callback);
             } catch (\ReflectionException $e) {
@@ -876,11 +882,10 @@ class Container implements ContainerInterface
             }
 
             return 'closure_' . $file . ':' . $reflector->getStartLine();
-
-        } elseif (is_object($callback)) {
-            return get_class($callback) . '::__invoke';
         } elseif (is_string($callback)) {
             return $callback;
+        } elseif (is_object($callback)) {
+            return get_class($callback) . '::__invoke';
         } else {
             return null;
         }

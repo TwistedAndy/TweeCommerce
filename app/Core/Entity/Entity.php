@@ -11,23 +11,23 @@ use JsonSerializable;
  */
 class Entity implements EntityInterface, JsonSerializable
 {
-    const STATUS_DRAFT = 0;
-    const STATUS_PENDING = 1;
-    const STATUS_PUBLISHED = 2;
-    const STATUS_ARCHIVED = 3;
-    const STATUS_DELETED = 4;
+    const STATUS_DRAFT     = 'draft';
+    const STATUS_PENDING   = 'pending';
+    const STATUS_PUBLISHED = 'published';
+    const STATUS_ARCHIVED  = 'archived';
+    const STATUS_DELETED   = 'deleted';
 
-    const TYPE_NONE = 0;
-    const TYPE_PAGE = 1;
-    const TYPE_POST = 2;
+    const TYPE_NONE = 'none';
+    const TYPE_PAGE = 'page';
+    const TYPE_POST = 'post';
 
     /**
      * Partitioned storage for class-specific data
      * Keys are the FQCN via static::class
      */
-    protected static array $entityCasters = [];
-    protected static array $resolvedTypes = [];
-    protected static array $resolvedMethods = [];
+    protected static array $entityCasters    = [];
+    protected static array $resolvedTypes    = [];
+    protected static array $resolvedMethods  = [];
     protected static array $resolvedStatuses = [];
 
     /**
@@ -137,8 +137,8 @@ class Entity implements EntityInterface, JsonSerializable
     {
         $class = static::class;
 
-        if (!isset(self::$resolvedStatuses[$class])) {
-            self::$resolvedStatuses[$class] = [
+        if (!isset(static::$resolvedStatuses[$class])) {
+            static::$resolvedStatuses[$class] = [
                 static::STATUS_DRAFT     => __('Draft', 'system'),
                 static::STATUS_PENDING   => __('Pending', 'system'),
                 static::STATUS_PUBLISHED => __('Published', 'system'),
@@ -147,7 +147,7 @@ class Entity implements EntityInterface, JsonSerializable
             ];
         }
 
-        return self::$resolvedStatuses[$class];
+        return static::$resolvedStatuses[$class];
     }
 
     /**

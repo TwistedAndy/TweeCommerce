@@ -65,7 +65,6 @@ class Container extends BaseConfig
         \CodeIgniter\Email\Email::class                     => 'email',
 
         // Application Bindings
-        \App\Core\Entity\EntityInterface::class             => \App\Core\Entity\Entity::class,
     ];
 
     /**
@@ -95,7 +94,6 @@ class Container extends BaseConfig
         \CodeIgniter\Format\Format::class,
 
         // Application Classes
-        \App\Core\Container\Container::class
     ];
 
     /**
@@ -123,7 +121,8 @@ class Container extends BaseConfig
         \CodeIgniter\Language\Language::class,
 
         // Application Classes
-        \App\Core\Actions\ActionsService::class,
+        \App\Core\Action\ActionService::class,
+        \App\Core\Action\ActionModel::class,
     ];
 
     /**
@@ -147,7 +146,7 @@ class Container extends BaseConfig
         };
 
         /*
-        $this->extenders[\App\Core\Actions\ActionsService::class] = [
+        $this->extenders[\App\Core\Action\ActionService::class] = [
             function ($service, $container) {
                 // Logic to wrap the service
                 return $service;
