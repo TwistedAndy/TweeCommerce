@@ -21,174 +21,181 @@ class ActionsModel extends Model
         'scheduled_at',
     ];
 
+    protected string $logsTable = 'actions_log';
+
     protected $useTimestamps = true;
     protected $dateFormat = 'int';
 
-    // Status Constants
+    /**
+     * Action statuses
+     */
     public const STATUS_PENDING = 1;
     public const STATUS_RUNNING = 2;
     public const STATUS_COMPLETED = 3;
     public const STATUS_FAILED = 4;
 
+    protected static array $statuses = [];
+
     /**
-     * ATOMIC CLAIM: High Performance & Concurrency Safe
+     * Get available action statuses
+     */
+    public static function getStatuses(): array
+    {
+        $class = static::class;
+
+        if (!isset(static::$statuses[$class])) {
+            static::$statuses[$class] = [
+                static::STATUS_PENDING   => __('Pending', 'system'),
+                static::STATUS_RUNNING   => __('Running', 'system'),
+                static::STATUS_COMPLETED => __('Completed', 'system'),
+                static::STATUS_FAILED    => __('Failed', 'system'),
+            ];
+        }
+
+        return static::$statuses[$class];
+    }
+
+    /**
+     * Current pending actions
+     */
+    protected ?array $pendingCache = null;
+
+    /**
+     * Defer a batch of actions
+     */
+    public function deferBatch(array $actions, int $batchInterval = 60, int $batchTimeout = 7200): void
+    {
+        if (empty($actions)) {
+            return;
+        }
+
+        if (!is_array($this->pendingCache)) {
+            $this->preloadPendingCache($batchInterval);
+        }
+
+        $batch = [];
+
+        foreach ($actions as $action) {
+            if (!isset($action['signature']) or isset($this->pendingCache[$action['signature']])) {
+                continue;
+            }
+
+            $row = $this->prepareRow($action);
+
+            if (is_array($row)) {
+                $batch[] = $row;
+            }
+        }
+
+        if (empty($batch)) {
+            return;
+        }
+
+        try {
+            $result = $this->builder()->insertBatch($batch);
+            if ($result !== false) {
+                foreach ($batch as $row) {
+                    $this->pendingCache[$row['signature']] = $row['scheduled_at'];
+                }
+            }
+        } catch (\Exception $e) {
+            throw new ActionsException('Failed to defer a batch. Error: ' . $e->getMessage());
+        }
+
+    }
+
+    /**
+     * Get a batch of actions and mark them as running
      */
     public function claimBatch(int $limit = 20): array
     {
-        $now = time();
         $this->db->transStart();
 
-        $sql = "SELECT id, action, callback, payload, priority, recurring, scheduled_at 
-                FROM {$this->table} 
-                WHERE status = ? 
-                AND scheduled_at <= ? 
-                ORDER BY priority DESC, scheduled_at ASC 
-                LIMIT ?";
+        try {
+            $sql = "SELECT * FROM {$this->table} WHERE status = ? AND scheduled_at <= ? ORDER BY priority ASC, scheduled_at ASC LIMIT ?";
 
-        // Check if the current database engine supports locks
-        $lockClause = $this->getLockClause();
+            $lockClause = $this->getLockClause();
 
-        if ($lockClause) {
-            $sql .= ' ' . $lockClause;
+            if ($lockClause) {
+                $sql .= ' ' . $lockClause;
+            }
+
+            $now = time();
+            $query = $this->db->query($sql, [self::STATUS_PENDING, $now, $limit]);
+
+            $actions = $query->getResultArray();
+
+            if (empty($actions)) {
+                $this->db->transComplete();
+                return [];
+            }
+
+            $ids = array_column($actions, $this->primaryKey);
+
+            // Update statuses
+            $this->whereIn('id', $ids)->set(['status' => self::STATUS_RUNNING, 'updated_at' => $now])->update();
+
+            // Update the pending cache
+            foreach ($actions as $action) {
+                unset($this->pendingCache[$action['signature']]);
+            }
+        } catch (\Exception $e) {
+            $this->db->transRollback();
+            throw new ActionsException('Failed to claim a batch. Error: ' . $e->getMessage());
         }
-
-        $query = $this->db->query($sql, [self::STATUS_PENDING, $now, $limit]);
-        $jobs = $query->getResultArray();
-
-        if (empty($jobs)) {
-            $this->db->transComplete();
-            return [];
-        }
-
-        // Update statuses
-        $ids = array_column($jobs, 'id');
-        $this->whereIn('id', $ids)
-             ->set(['status' => self::STATUS_RUNNING, 'updated_at' => $now])
-             ->update();
 
         $this->db->transComplete();
 
-        return $jobs;
+        return $actions;
     }
 
     /**
-     * COMPLETION: Move from Running -> Completed + Log
+     * Mark a list of actions as completed
      */
-    public function completeBatch(array $ids): void
+    public function completeBatch(array $actions): void
     {
-        if (empty($ids)) {
-            return;
-        }
-
-        $this->db->transStart();
-
-        // Update Status
-        $this->whereIn('id', $ids)
-             ->set(['status' => self::STATUS_COMPLETED, 'updated_at' => time()])
-             ->update();
-
-        // Logs
-        $logs = [];
-        foreach ($ids as $id) {
-            $logs[] = [
-                'action_id'  => $id,
-                'status'     => self::STATUS_COMPLETED,
-                'message'    => 'Action completed successfully',
-                'created_at' => time()
-            ];
-        }
-        $this->db->table('action_logs')->insertBatch($logs);
-
-        $this->db->transComplete();
+        $this->updateStatus($actions, static::STATUS_COMPLETED, true, 'Action Completed');
     }
 
     /**
-     * FAILURE: Move from Running -> Failed + Log Error
+     * Mark a batch as failed
      */
-    public function failBatch(array $failures): void
+    public function failBatch(array $actions): void
     {
-        if (empty($failures)) {
-            return;
-        }
-
-        $ids = array_keys($failures);
-        $this->db->transStart();
-
-        // 1. Update Status
-        $this->whereIn('id', $ids)
-             ->set(['status' => self::STATUS_FAILED, 'updated_at' => time()])
-             ->update();
-
-        // [REMOVED] delete from action_claims (Table does not exist)
-
-        // 2. Logs
-        $logs = [];
-        foreach ($failures as $id => $data) {
-            $logs[] = [
-                'action_id'  => $id,
-                'status'     => self::STATUS_FAILED,
-                'message'    => json_encode($data['error_log']),
-                'created_at' => time()
-            ];
-        }
-        $this->db->table('action_logs')->insertBatch($logs);
-
-        $this->db->transComplete();
+        $this->updateStatus($actions, static::STATUS_FAILED, true, 'Action Failed');
     }
 
     /**
      * Reset specific jobs from Running back to Pending.
      * Used when a worker runs out of time and needs to yield tasks back to the queue.
      */
-    public function releaseBatch(array $ids): void
+    public function releaseBatch(array $actions): void
     {
-        if (empty($ids)) {
-            return;
-        }
-
-        $this->db->transStart();
-
-        // Reset to Pending
-        $this->whereIn('id', $ids)
-             ->set(['status' => self::STATUS_PENDING, 'updated_at' => time()])
-             ->update();
-
-        $this->db->transComplete();
+        $this->updateStatus($actions, self::STATUS_PENDING, true, 'Action Released');
     }
 
     /**
-     * DEDUPLICATION: Helper remains mostly the same
+     * Retry actions stuck in running status due to an error
      */
-    public function getExistingSignatures(array $signatures, int $seconds = 300): array
+    public function retryActions(int $timeoutSeconds = 7200): void
     {
-        if (empty($signatures)) {
-            return [];
-        }
+        $builder = $this->builder();
 
-        return $this->select('signature')
-                    ->whereIn('signature', $signatures)
-                    ->where('status <', self::STATUS_COMPLETED)
-                    ->where('created_at >', time() - $seconds)
-                    ->findAll();
+        $builder->where([
+            'status'       => self::STATUS_RUNNING,
+            'updated_at <' => time() - $timeoutSeconds,
+        ]);
+
+        $actions = $builder->get()->getResultArray();
+
+        $this->updateStatus($actions, self::STATUS_PENDING, true, 'Retry action after being stuck.');
     }
 
     /**
-     * RECOVERY: Reset stuck jobs (Self-Healing)
-     * If a worker crashes hard (segfault/OOM), the transaction rolls back automatically
-     * and the job stays PENDING (Safe!).
-     * However, if the worker finishes the transaction but dies during execution PHP-side,
-     * the job stays RUNNING forever. This fixes that.
+     * Get the supported database lock clause
+     *
+     * @return string
      */
-    public function retryStaleJobs(int $timeoutSeconds = 3600): int
-    {
-        $limit = time() - $timeoutSeconds;
-        $this->where('status', self::STATUS_RUNNING)
-             ->where('updated_at <', $limit)
-             ->set(['status' => self::STATUS_PENDING, 'updated_at' => time()])
-             ->update();
-        return $this->db->affectedRows();
-    }
-
     protected function getLockClause(): string
     {
         $driver = $this->db->DBDriver;
@@ -215,4 +222,161 @@ class ActionsModel extends Model
 
         return $supportSkip ? 'FOR UPDATE SKIP LOCKED' : 'FOR UPDATE';
     }
+
+    /**
+     * Prepare data before inserting in the database
+     */
+    protected function prepareRow(array $action): array|false
+    {
+        if (empty($action['action']) or empty($action['callback']) or empty($action['signature'])) {
+            return false;
+        }
+
+        unset($action[$this->primaryKey]);
+
+        if (strlen($action['action']) > 191) {
+            $action['action'] = substr($action['action'], 0, 191);
+        }
+
+        if (strlen($action['callback']) > 191) {
+            $action['callback'] = substr($action['callback'], 0, 191);
+        }
+
+        if (strlen($action['signature']) > 32) {
+            $action['signature'] = substr($action['signature'], 0, 32);
+        }
+
+        if (!empty($action['recurring']) and strlen($action['recurring']) > 64) {
+            $action['recurring'] = substr($action['recurring'], 0, 64);
+        }
+
+        if (empty($action['priority']) or !is_numeric($action['priority'])) {
+            $action['priority'] = 10;
+        } elseif ($action['priority'] < 1) {
+            $action['priority'] = 1;
+        } elseif ($action['priority'] > 1000) {
+            $action['priority'] = 1000;
+        } else {
+            $action['priority'] = (int) $action['priority'];
+        }
+
+        if (!isset($action['status']) or !is_numeric($action['status']) or $action['status'] > 4 or $action['status'] < 1) {
+            $action['status'] = static::STATUS_PENDING;
+        } else {
+            $statuses = self::getStatuses();
+            if (!isset($statuses[$action['status']])) {
+                $action['status'] = static::STATUS_PENDING;
+            } else {
+                $action['status'] = (int) $action['status'];
+            }
+        }
+
+        $action['created_at'] = time();
+        $action['updated_at'] = null;
+
+        if (empty($action['scheduled_at']) or !is_numeric($action['scheduled_at'])) {
+            $action['scheduled_at'] = time();
+        } else {
+            $action['scheduled_at'] = (int) $action['scheduled_at'];
+        }
+
+        return $action;
+
+    }
+
+    /**
+     * Preload cache with pending actions
+     */
+    protected function preloadPendingCache(int $interval = 60, int $timeout = 7200): void
+    {
+        try {
+            $builder = $this->builder()->select('signature, scheduled_at');
+
+            $time = time();
+
+            $builder->where([
+                'scheduled_at <=' => $time + $interval, // Include future actions
+                'scheduled_at >=' => $time - $timeout, // Exclude stuck actions
+                'status'          => self::STATUS_PENDING,
+            ])->orderBy('id DESC');
+
+            $cache = [];
+            $rows = $builder->get()->getResultArray();
+
+            if ($rows) {
+                foreach ($rows as $row) {
+                    $cache[$row['signature']] = $row['scheduled_at'];
+                }
+            }
+        } catch (\Exception $e) {
+            throw new ActionsException('Failed to get pending cache. Error: ' . $e->getMessage());
+        }
+
+        $this->pendingCache = $cache;
+    }
+
+    /**
+     * Update the action statuses
+     */
+    protected function updateStatus(array $actions, int $status, bool $log = true, string $message = ''): bool
+    {
+        if (empty($actions)) {
+            return false;
+        }
+
+        $statuses = self::getStatuses();
+
+        if (!isset($statuses[$status])) {
+            throw new ActionsException('Incorrect status provided: ' . $status);
+        }
+
+        try {
+            $ids = array_column($actions, $this->primaryKey);
+
+            $result = $this->whereIn('id', $ids)->set(['status' => $status, 'updated_at' => time()])->update();
+
+            if (!empty($this->pendingCache)) {
+                foreach ($actions as $action) {
+                    unset($this->pendingCache[$action['signature']]);
+                }
+            }
+
+            if ($result === false) {
+                return false;
+            }
+
+            if ($log === false) {
+                return true;
+            }
+
+            $logs = [];
+
+            $message = sanitize_text($message);
+
+            foreach ($actions as $action) {
+                if (empty($action[$this->primaryKey]) or !is_numeric($action[$this->primaryKey])) {
+                    continue;
+                }
+
+                $logs[] = [
+                    'action_id'  => $action[$this->primaryKey],
+                    'status'     => $status,
+                    'message'    => empty($action['message']) ? $message : $action['message'],
+                    'created_at' => time()
+                ];
+            }
+
+            // Log the status change
+            if ($logs) {
+                $this->db->table($this->logsTable)->insertBatch($logs);
+            }
+
+            return true;
+
+        } catch (\Exception $e) {
+            throw new ActionsException('Failed to mark batch as ' . $statuses[$status] . '. Actions: ' . implode(', ', $ids) . '. Error: ' . $e->getMessage());
+        }
+
+    }
+
 }

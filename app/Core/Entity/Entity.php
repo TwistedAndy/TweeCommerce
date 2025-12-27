@@ -137,8 +137,8 @@ class Entity implements EntityInterface, JsonSerializable
     {
         $class = static::class;
 
-        if (!isset(self::$resolvedStatuses[$class])) {
-            self::$resolvedStatuses[$class] = [
+        if (!isset(static::$resolvedStatuses[$class])) {
+            static::$resolvedStatuses[$class] = [
                 static::STATUS_DRAFT     => __('Draft', 'system'),
                 static::STATUS_PENDING   => __('Pending', 'system'),
                 static::STATUS_PUBLISHED => __('Published', 'system'),
@@ -147,7 +147,7 @@ class Entity implements EntityInterface, JsonSerializable
             ];
         }
 
-        return self::$resolvedStatuses[$class];
+        return static::$resolvedStatuses[$class];
     }
 
     /**

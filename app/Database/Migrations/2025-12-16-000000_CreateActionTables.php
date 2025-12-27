@@ -12,14 +12,14 @@ class CreateActionTables extends Migration
         $this->forge->addField([
             'id'           => ['type' => 'BIGINT', 'constraint' => 20, 'unsigned' => true, 'auto_increment' => true],
             'action'       => ['type' => 'VARCHAR', 'constraint' => 191],
-            'callback'     => ['type' => 'VARCHAR', 'constraint' => 191],
+            'callback'     => ['type' => 'TEXT'],
             'payload'      => ['type' => 'TEXT'],
             'status'       => ['type' => 'TINYINT', 'constraint' => 1, 'default' => 1],
             'priority'     => ['type' => 'INT', 'constraint' => 3, 'default' => 10],
             'recurring'    => ['type' => 'VARCHAR', 'constraint' => 64, 'null' => true],
             'signature'    => ['type' => 'VARCHAR', 'constraint' => 32],
             'created_at'   => ['type' => 'INT', 'unsigned' => true],
-            'updated_at'   => ['type' => 'INT', 'unsigned' => true],
+            'updated_at'   => ['type' => 'INT', 'unsigned' => true, 'null' => true],
             'scheduled_at' => ['type' => 'INT', 'unsigned' => true],
         ]);
         $this->forge->addKey('id', true);
@@ -37,12 +37,12 @@ class CreateActionTables extends Migration
         ]);
         $this->forge->addKey('id', true);
         $this->forge->addForeignKey('action_id', 'actions', 'id', 'CASCADE', 'CASCADE');
-        $this->forge->createTable('action_logs');
+        $this->forge->createTable('actions_log');
     }
 
     public function down()
     {
-        $this->forge->dropTable('action_logs');
+        $this->forge->dropTable('actions_log');
         $this->forge->dropTable('actions');
     }
 }
