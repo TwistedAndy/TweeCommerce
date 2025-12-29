@@ -203,7 +203,7 @@ class ActionService
                     if (!empty($action['recurring'])) {
                         $this->handleRecurring($action);
                     }
-                } catch (\Exception $e) {
+                } catch (\Throwable $e) {
                     $action['message'] = 'Error: ' . $e->getMessage() . '. Trace: ' . $e->getTraceAsString();
                     $this->model->failBatch([$action]);
                 }

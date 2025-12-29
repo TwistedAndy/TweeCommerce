@@ -877,6 +877,11 @@ class Container implements ContainerInterface
 
             $file = $reflector->getFileName();
 
+            // Do not cache serialized closures because they share the same file and line number
+            if (str_contains($file, "eval()'d code")) {
+                return null;
+            }
+
             if (defined('ROOTPATH')) {
                 $file = str_replace(ROOTPATH, '', $file);
             }

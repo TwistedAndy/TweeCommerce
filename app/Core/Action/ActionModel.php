@@ -29,11 +29,11 @@ class ActionModel extends Model
     /**
      * Action statuses
      */
-    public const STATUS_PENDING  = 'pending';
-    public const STATUS_RUNNING  = 'running';
-    public const STATUS_COMPLETE = 'complete';
-    public const STATUS_CANCELED = 'canceled';
-    public const STATUS_FAILED   = 'failed';
+    public const STATUS_PENDING   = 'pending';
+    public const STATUS_RUNNING   = 'running';
+    public const STATUS_COMPLETED = 'completed';
+    public const STATUS_CANCELED  = 'canceled';
+    public const STATUS_FAILED    = 'failed';
 
     protected static array $statuses = [];
 
@@ -46,11 +46,11 @@ class ActionModel extends Model
 
         if (!isset(static::$statuses[$class])) {
             static::$statuses[$class] = [
-                static::STATUS_PENDING  => __('Pending', 'system'),
-                static::STATUS_RUNNING  => __('Running', 'system'),
-                static::STATUS_COMPLETE => __('Complete', 'system'),
-                static::STATUS_CANCELED => __('Canceled', 'system'),
-                static::STATUS_FAILED   => __('Failed', 'system'),
+                static::STATUS_PENDING   => __('Pending', 'system'),
+                static::STATUS_RUNNING   => __('Running', 'system'),
+                static::STATUS_COMPLETED => __('Completed', 'system'),
+                static::STATUS_CANCELED  => __('Canceled', 'system'),
+                static::STATUS_FAILED    => __('Failed', 'system'),
             ];
         }
 
@@ -164,7 +164,7 @@ class ActionModel extends Model
      */
     public function completeBatch(array $actions): void
     {
-        $this->updateStatus($actions, static::STATUS_COMPLETE, true, 'Action Completed');
+        $this->updateStatus($actions, static::STATUS_COMPLETED, true, 'Action Completed');
     }
 
     /**

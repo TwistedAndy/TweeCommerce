@@ -109,12 +109,12 @@ class ActionClosure
             throw new ActionException('Closure security signature mismatch.');
         }
 
-        // Decode an unserialize the data
-        $payload = unserialize(base64_decode($data['data']));
+        // Decode the closure code
+        $__payload = unserialize(base64_decode($data['data']));
 
         // Unwrap context and args
-        $context = $this->unwrapClosures($payload['context']);
-        $this->args = $this->unwrapClosures($payload['args'] ?? []);
+        $context = $this->unwrapClosures($__payload['context']);
+        $this->args = $this->unwrapClosures($__payload['args'] ?? []);
 
         // Extract variables into local scope
         // This makes the variables available to the closure when we eval() it.
@@ -122,7 +122,7 @@ class ActionClosure
 
         // Reconstruct Closure
         // We wrap the code in "return ... ;" so eval passes the object back to us.
-        $closure = @eval("return " . $payload['code'] . ";");
+        $closure = @eval("return " . $__payload['code'] . ";");
 
         if (!$closure instanceof Closure) {
             throw new ActionException('Failed to reconstruct closure.');
@@ -178,6 +178,7 @@ class ActionClosure
         $body = implode("", array_slice($source, $startLine, $length));
 
         $tokens = token_get_all("<?php " . $body);
+        $isFunction = true;
         $state = 'start';
         $balance = 0;
         $code = '';
@@ -187,42 +188,50 @@ class ActionClosure
             $type = is_array($token) ? $token[0] : null;
 
             // Skip comments and PHP tags
-            if ($type === T_COMMENT || $type === T_DOC_COMMENT || $type === T_OPEN_TAG) {
+            if ($type === T_COMMENT or $type === T_DOC_COMMENT or $type === T_OPEN_TAG) {
                 continue;
             }
 
             if ($state === 'start') {
-                if ($type === T_FUNCTION || $type === T_FN) {
+                // Detect PHP 8 Attributes, T_FUNCTION, or T_FN
+                if ($type === T_FUNCTION) {
                     $state = 'recording';
+                    $code .= $text;
+                } elseif ($type === T_FN) {
+                    $state = 'recording';
+                    $isFunction = false;
                     $code .= $text;
                 }
             } elseif ($state === 'recording') {
                 $code .= $text;
 
-                // Handle Balance
-                if (in_array($text, ['{', '[', '(']) || $type === T_CURLY_OPEN || $type === T_DOLLAR_OPEN_CURLY_BRACES) {
+                // Track brace balance for standard functions
+                if (in_array($text, ['{', '[', '(']) or $type === T_CURLY_OPEN or $type === T_DOLLAR_OPEN_CURLY_BRACES) {
                     $balance++;
                 } elseif (in_array($text, ['}', ']', ')'])) {
                     $balance--;
                 }
 
+                if ($balance > 0) {
+                    continue;
+                }
+
                 // Stop Conditions
-                if ($balance <= 0) {
-                    // 1. Brace-style function end "}"
-                    if ($text === '}' && $balance === 0) {
+                if ($isFunction and $balance === 0 and $text === '}') {
+                    // Standard "function() { ... }" closure
+                    break;
+                } elseif (!$isFunction) {
+                    // Arrow functions end at the first terminator (;, ,) or unbalanced closing paren )
+                    if ($text === ';' or $text === ',') {
+                        $code = substr($code, 0, -1);
                         break;
                     }
 
-                    // 2. Statement end ";" or Argument separator ","
-                    if (($text === ';' || $text === ',') && $balance === 0) {
-                        $code = substr($code, 0, -1); // Strip terminator
-                        break;
-                    }
-
-                    // 3. Parenthesis closure of parent function ")"
-                    // Only break if balance goes NEGATIVE (meaning it closed a parent paren)
-                    if ($text === ')' && $balance < 0) {
-                        $code = substr($code, 0, -1); // Strip terminator
+                    // If we hit a closing paren or a bracket that belongs to:
+                    // - a parent function call (e.g. call( fn($x)=>$x ))
+                    // - a parent array (e.g. [ fn($x)=>$x ])
+                    if ($balance < 0 and ($text === ')' or $text === ']')) {
+                        $code = substr($code, 0, -1);
                         break;
                     }
                 }
@@ -238,7 +247,7 @@ class ActionClosure
     protected function getSecretKey(): string
     {
         // Try Environment
-        $key = getenv('encryption.key') ?: ($_ENV['encryption.key'] ?? null);
+        $key = getenv('encryption.key') ? : ($_ENV['encryption.key'] ?? null);
 
         // Try CodeIgniter Config (Fallback)
         if (!$key and function_exists('config')) {
