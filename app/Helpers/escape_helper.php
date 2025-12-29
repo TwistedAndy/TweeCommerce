@@ -1,6 +1,7 @@
 <?php
 
-use App\Libraries\Escaper;
+use \App\Core\Container\Container;
+use \App\Core\Libraries\Escaper;
 
 if (!function_exists('esc_html')) {
     /**
@@ -12,6 +13,6 @@ if (!function_exists('esc_html')) {
      */
     function esc_html($string): string
     {
-        return Escaper::escapeHtml($string);
+        return Container::getInstance()->make(Escaper::class)->escapeHtml($string);
     }
 }

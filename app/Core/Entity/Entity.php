@@ -2,7 +2,8 @@
 
 namespace App\Core\Entity;
 
-use App\Libraries\Escaper;
+use App\Core\Libraries\Escaper;
+use App\Core\Container\Container;
 use CodeIgniter\Exceptions\BadMethodCallException;
 use JsonSerializable;
 
@@ -29,6 +30,8 @@ class Entity implements EntityInterface, JsonSerializable
     protected static array $resolvedTypes    = [];
     protected static array $resolvedMethods  = [];
     protected static array $resolvedStatuses = [];
+
+    protected static Escaper $escaper;
 
     /**
      * Get the primary key attribute
@@ -171,15 +174,21 @@ class Entity implements EntityInterface, JsonSerializable
      */
     public function __construct(?array $data = null)
     {
-        $class = static::class;
+        $class    = static::class;
         $defaults = static::getEntityDefaults();
 
         if (!isset(static::$resolvedMethods[$class])) {
 
-            self::$entityCasters[$class] = app(\App\Core\Entity\EntityCaster::class, [
+            $container = Container::getInstance();
+
+            // Create separate casters for each entity type
+            self::$entityCasters[$class] = $container->make(EntityCaster::class, [
                 static::getEntityCasts(),
                 static::getEntityCastHandlers()
             ]);
+
+            // Assign an escaper
+            static::$escaper = $container->make(Escaper::class);
 
             static::$resolvedMethods[$class] = [];
 
@@ -189,7 +198,9 @@ class Entity implements EntityInterface, JsonSerializable
                 } else {
                     $method = ucfirst($key);
                 }
+
                 static::$resolvedMethods[$class][$key] = $method;
+
                 static::$resolvedMethods[$class]['get' . $method] = $key;
                 static::$resolvedMethods[$class]['set' . $method] = $key;
             }
@@ -220,7 +231,7 @@ class Entity implements EntityInterface, JsonSerializable
                 $casts = static::getEntityCasts();
                 if (!isset($casts[$key]) or $casts[$key] === 'text') {
                     if (!isset($this->escaped[$key])) {
-                        $this->escaped[$key] = Escaper::escapeHtml($value);
+                        $this->escaped[$key] = static::$escaper->escapeHtml($value);
                     }
                     $value = $this->escaped[$key];
                 }
@@ -291,7 +302,7 @@ class Entity implements EntityInterface, JsonSerializable
      */
     public function setAttributes(array $attributes): void
     {
-        $attributes = self::$entityCasters[static::class]->fromDataSource($attributes);
+        $attributes       = self::$entityCasters[static::class]->fromDataSource($attributes);
         $this->attributes = $attributes + $this->attributes;
     }
 
@@ -305,7 +316,7 @@ class Entity implements EntityInterface, JsonSerializable
         $casts = static::getEntityCasts();
 
         if (isset($casts[$attribute]) and isset(self::$entityCasters[static::class])) {
-            $data = self::$entityCasters[static::class]->fromDataSource([$attribute => $newValue]);
+            $data     = self::$entityCasters[static::class]->fromDataSource([$attribute => $newValue]);
             $newValue = $data[$attribute];
         }
 
@@ -390,7 +401,7 @@ class Entity implements EntityInterface, JsonSerializable
     public function restoreOriginal(): void
     {
         $this->attributes = $this->original + $this->attributes;
-        $this->original = [];
+        $this->original   = [];
     }
 
     /**

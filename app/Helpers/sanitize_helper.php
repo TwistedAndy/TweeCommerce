@@ -1,6 +1,7 @@
 <?php
 
-use App\Libraries\Sanitizer;
+use \App\Core\Container\Container;
+use \App\Core\Libraries\Sanitizer;
 
 if (!function_exists('sanitize_key')) {
     /**
@@ -12,7 +13,7 @@ if (!function_exists('sanitize_key')) {
      */
     function sanitize_key(string $text): string
     {
-        return Sanitizer::sanitizeKey($text);
+        return Container::getInstance()->make(Sanitizer::class)->sanitizeKey($text);
     }
 }
 
@@ -26,7 +27,7 @@ if (!function_exists('sanitize_filename')) {
      */
     function sanitize_filename(string $filename): string
     {
-        return Sanitizer::sanitizeFilename($filename);
+        return Container::getInstance()->make(Sanitizer::class)->sanitizeFilename($filename);
     }
 }
 
@@ -41,7 +42,7 @@ if (!function_exists('sanitize_text')) {
      */
     function sanitize_text(string $string, bool $newLines = false): string
     {
-        return Sanitizer::sanitizeText($string, $newLines);
+        return Container::getInstance()->make(Sanitizer::class)->sanitizeText($string, $newLines);
     }
 }
 
@@ -56,6 +57,6 @@ if (!function_exists('sanitize_html')) {
      */
     function sanitize_html(string $html, ?string $allowedTags = null): string
     {
-        return Sanitizer::sanitizeHtml($html, $allowedTags);
+        return Container::getInstance()->make(Sanitizer::class)->sanitizeHtml($html, $allowedTags);
     }
 }

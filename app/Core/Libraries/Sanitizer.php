@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Libraries;
+namespace App\Core\Libraries;
 
 /**
  * Sanitizer Library
@@ -46,16 +46,29 @@ class Sanitizer
     /**
      * Attribute protocols pattern
      */
-    protected static string $protocolsCache = '';
+    protected string $protocolsCache = '';
+
+    public function __construct()
+    {
+        // Build spaced-out patterns for all dangerous keywords
+        $protocols = [];
+        $keywords  = ['javascript', 'vbscript', 'data', 'livescript', 'behavior', 'expression', 'import'];
+
+        foreach ($keywords as $keyword) {
+            $protocols[] = implode('([\s\0\x09\x0A\x0D]|&#[xX]?[0-9a-fA-F]+;?|\/\*.*?\*\/)*', str_split($keyword));
+        }
+
+        $this->protocolsCache = '(' . implode('|', $protocols) . ')';
+    }
 
     /**
      * Sanitize a key or a slug
      */
-    public static function sanitizeKey(string $text): string
+    public function sanitizeKey(string $text): string
     {
-        $text = self::normalizeString($text);
+        $text = $this->normalizeString($text);
 
-        $text = self::transliterate($text);
+        $text = $this->transliterate($text);
 
         $text = mb_strtolower($text, 'UTF-8');
 
@@ -65,9 +78,9 @@ class Sanitizer
     /**
      * Sanitize a filename (preserve extension, remove accents, filesystem safe)
      */
-    public static function sanitizeFilename(string $filename): string
+    public function sanitizeFilename(string $filename): string
     {
-        $filename = self::normalizeString($filename);
+        $filename = $this->normalizeString($filename);
 
         $info = pathinfo($filename);
 
@@ -76,7 +89,7 @@ class Sanitizer
         $name = $info['filename'];
 
         // Remove accents and normalize Unicode
-        $name = self::transliterate($name);
+        $name = $this->transliterate($name);
         $name = mb_strtolower($name, 'UTF-8');
 
         // Allow a-z, 0-9, dash, underscore, space. Remove everything else.
@@ -105,9 +118,9 @@ class Sanitizer
     /**
      * Remove all tags and special characters from a string
      */
-    public static function sanitizeText(string $text, bool $newLines = false): string
+    public function sanitizeText(string $text, bool $newLines = false): string
     {
-        $text = static::normalizeString($text);
+        $text = $this->normalizeString($text);
 
         if (str_contains($text, '<')) {
             $text = preg_replace('/<(?!\/?([a-z]|!))/i', '&lt;', $text);
@@ -138,36 +151,37 @@ class Sanitizer
     /**
      * Remove any potentially malicious code and tags
      */
-    public static function sanitizeHtml(string $html, ?string $allowedTags = null): string
+    public function sanitizeHtml(string $html, ?string $allowedTags = null): string
     {
         // Swap placeholders for existing entities to restore them later
         $html = str_ireplace(['&lt;', '&gt;', '%3c', '%3e'], ['##lt##', '##gt##', '<', '>'], $html);
 
-        $html = static::normalizeString($html);
+        $html = $this->normalizeString($html);
 
         if (!str_contains($html, '<')) {
             return trim($html);
         }
 
         if ($allowedTags === null) {
-            $html = strip_tags($html, static::TAGS_DEFAULT);
-        } elseif ($allowedTags !== static::TAGS_FULL) {
+            $html = strip_tags($html, $this::TAGS_DEFAULT);
+        } elseif ($allowedTags !== $this::TAGS_FULL) {
             $allowedTags = match ($allowedTags) {
-                'basic' => static::TAGS_BASIC,
-                'default' => static::TAGS_DEFAULT,
+                'basic' => $this::TAGS_BASIC,
+                'default' => $this::TAGS_DEFAULT,
                 default => $allowedTags,
             };
+
             $html = strip_tags($html, $allowedTags);
         }
 
         // Sanitize tag attributes
-        $html = static::processAttributes($html);
+        $html = $this->processAttributes($html);
 
         $html = str_ireplace(['##lt##', '##gt##'], ['&lt;', '&gt;'], $html);
 
         // Process <style> sections
         if (str_contains($html, '<style')) {
-            $html = self::processStyle($html);
+            $html = $this->processStyle($html);
         }
 
         // Remove tags with empty or too short src
@@ -180,8 +194,8 @@ class Sanitizer
             $html = ltrim($html, '"> ');
         }
 
-        if (static::hasUnbalancedTags($html)) {
-            $html = static::balanceTags($html);
+        if ($this->hasUnbalancedTags($html)) {
+            $html = $this->balanceTags($html);
         }
 
         return trim($html);
@@ -190,29 +204,29 @@ class Sanitizer
     /**
      * Balance HTML tags and remove stray tags
      */
-    public static function balanceTags(string $html): string
+    public function balanceTags(string $html): string
     {
         // Find all tags: <(slash?)(tagname)(attributes)>
         // This pattern matches: <div...>, </div>, <img ... />
         preg_match_all('/<(\/?)([a-z0-9:-]+)([^>]*)>/i', $html, $matches, PREG_OFFSET_CAPTURE);
 
-        $output = '';
-        $stack = [];
+        $output       = '';
+        $stack        = [];
         $lastPosition = 0;
 
         foreach ($matches[0] as $key => $full_match) {
 
             // Append text content that exists BEFORE this tag
-            $position = $full_match[1];
-            $output .= substr($html, $lastPosition, $position - $lastPosition);
+            $position     = $full_match[1];
+            $output       .= substr($html, $lastPosition, $position - $lastPosition);
             $lastPosition = $position + strlen($full_match[0]);
 
             // Analyze the tag components
             $tag = strtolower($matches[2][$key][0]);
 
-            $attrs = $matches[3][$key][0];
-            $isSingle = isset(static::TAGS_SINGLE[$tag]);
-            $isClose = ($matches[1][$key][0] === '/');
+            $attrs    = $matches[3][$key][0];
+            $isSingle = isset($this::TAGS_SINGLE[$tag]);
+            $isClose  = ($matches[1][$key][0] === '/');
 
             if ($isClose) {
                 // Handle Closing Tag
@@ -234,7 +248,7 @@ class Sanitizer
                 // Check for XHTML self-closing style <div /> on non-single tags
                 if (substr(trim($attrs), -1) === '/' && !$isSingle) {
                     $cleanAttrs = rtrim(trim($attrs), '/');
-                    $output .= "<$tag$cleanAttrs></$tag>";
+                    $output     .= "<$tag$cleanAttrs></$tag>";
                 } else {
                     // Output the open tag
                     $output .= "<$tag$attrs>";
@@ -260,7 +274,7 @@ class Sanitizer
     /**
      * Check if a string contains unbalanced or improperly nested tags.
      */
-    public static function hasUnbalancedTags(string $html): bool
+    public function hasUnbalancedTags(string $html): bool
     {
         // Find all tags: <(slash?)(tagname)>
         if (!preg_match_all('/<(\/?)([a-z0-9:-]+)[^>]*>/i', $html, $matches)) {
@@ -276,7 +290,7 @@ class Sanitizer
             $is_close = ($matches[1][$index] === '/');
 
             // Skip single tags (e.g. <br>, <img>) as they don't affect balance
-            if (isset(static::TAGS_SINGLE[$tag])) {
+            if (isset($this::TAGS_SINGLE[$tag])) {
                 continue;
             }
 
@@ -308,7 +322,7 @@ class Sanitizer
     /**
      * Prepare the string
      */
-    protected static function normalizeString(string $text): string
+    public function normalizeString(string $text): string
     {
         // Check the encoding first
         if (!mb_check_encoding($text, 'UTF-8')) {
@@ -328,7 +342,7 @@ class Sanitizer
     /**
      * Transliterate a string (remove accents) with fallback
      */
-    protected static function transliterate(string $text): string
+    public function transliterate(string $text): string
     {
         if (function_exists('normalizer_is_normalized') and !normalizer_is_normalized($text)) {
             $text = normalizer_normalize($text);
@@ -351,7 +365,7 @@ class Sanitizer
     /**
      * Sanitize the <style> tags
      */
-    protected static function processStyle(string $html): string
+    protected function processStyle(string $html): string
     {
         return preg_replace_callback('#(<style[^>]*>)(.*?)(</style>)#si', function ($matches) {
 
@@ -395,32 +409,22 @@ class Sanitizer
     /**
      * Sanitize tag attributes
      */
-    protected static function processAttributes(string $html): string
+    protected function processAttributes(string $html): string
     {
         // Force quotes on attributes
-        $count = 0;
+        $count   = 0;
         $pattern = '/(<[a-z0-9]+\b[^>]*?)\s+([a-z0-9_-]+)\s*=\s*(?!["\'])([^\s>]+)/iu';
 
         do {
             $html = preg_replace($pattern, '$1 $2="$3"', $html, -1, $count);
         } while ($count > 0);
 
-        // Build spaced-out patterns for all dangerous keywords
-        if (static::$protocolsCache === '') {
-            $protocols = [];
-            $keywords = ['javascript', 'vbscript', 'data', 'livescript', 'behavior', 'expression', 'import'];
-            foreach ($keywords as $keyword) {
-                $protocols[] = implode('([\s\0\x09\x0A\x0D]|&#[xX]?[0-9a-fA-F]+;?|\/\*.*?\*\/)*', str_split($keyword));
-            }
-            static::$protocolsCache = '(' . implode('|', $protocols) . ')';
-        }
-
         $patterns = [
             // Clean the dangerous attributes like on
             '/(<[a-z][a-z0-9]*\b[^>]*?)\K([\s\/]+(on[a-z]+|formaction|classid|dynsrc|lowsrc)\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+))/siu',
 
             // Check attributes, which may have a link
-            '/(<[a-z][a-z0-9]*\b[^>]*?)\K([\s\/]+(href|src|style|action|data|formaction|background|cite|poster|xlink:href)\s*=\s*("[^"]*?(' . static::$protocolsCache . ')[^"]*?"|\'[^\']*?(' . static::$protocolsCache . ')[^\']*?\'|[^\s>]*?(' . static::$protocolsCache . ')[^\s>]*))/siu',
+            '/(<[a-z][a-z0-9]*\b[^>]*?)\K([\s\/]+(href|src|style|action|data|formaction|background|cite|poster|xlink:href)\s*=\s*("[^"]*?(' . $this->protocolsCache . ')[^"]*?"|\'[^\']*?(' . $this->protocolsCache . ')[^\']*?\'|[^\s>]*?(' . $this->protocolsCache . ')[^\s>]*))/siu',
 
             // Check malformed attributes
             '/(<[a-z][a-z0-9]*\b[^>]*?)\K([\s\/]+[a-z0-9_-]+\s*=\s*("[^"]*"|\'[^\']*\')[^\s>]+)/siu',

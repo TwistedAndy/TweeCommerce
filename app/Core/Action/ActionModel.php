@@ -207,7 +207,7 @@ class ActionModel extends Model
      */
     protected function getLockClause(): string
     {
-        $driver = $this->db->DBDriver;
+        $driver  = $this->db->DBDriver;
         $version = $this->db->getVersion();
 
         switch ($driver) {
@@ -311,7 +311,7 @@ class ActionModel extends Model
             ])->orderBy('id DESC');
 
             $cache = [];
-            $rows = $builder->get()->getResultArray();
+            $rows  = $builder->get()->getResultArray();
 
             if ($rows) {
                 foreach ($rows as $row) {
@@ -360,8 +360,6 @@ class ActionModel extends Model
             }
 
             $logs = [];
-
-            $message = sanitize_text($message);
 
             foreach ($actions as $action) {
                 if (empty($action[$this->primaryKey]) or !is_numeric($action[$this->primaryKey])) {

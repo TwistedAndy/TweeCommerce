@@ -2,8 +2,7 @@
 
 namespace App\Core\Entity;
 
-use App\Libraries\Sanitizer;
-use CodeIgniter\Database\BaseConnection;
+use App\Core\Libraries\Sanitizer;
 use CodeIgniter\DataCaster\Cast\ArrayCast;
 use CodeIgniter\DataCaster\Cast\BooleanCast;
 use CodeIgniter\DataCaster\Cast\CSVCast;
@@ -20,9 +19,9 @@ use JsonException;
 
 class EntityCaster
 {
-    protected array $casts = [];
-    protected array $nullable = [];
-    protected ?BaseConnection $helper = null;
+    protected array     $casts    = [];
+    protected array     $nullable = [];
+    protected Sanitizer $sanitizer;
 
     protected array $castHandlers = [
         'array'     => ArrayCast::class,
@@ -40,7 +39,7 @@ class EntityCaster
         'uri'       => URICast::class,
     ];
 
-    public function __construct(array $casts, array $castHandlers = [], ?BaseConnection $helper = null)
+    public function __construct(array $casts, ?array $castHandlers, Sanitizer $sanitizer)
     {
         foreach ($casts as $field => $cast) {
             if (str_starts_with($cast, '?')) {
@@ -55,9 +54,7 @@ class EntityCaster
             $this->castHandlers = $castHandlers + $this->castHandlers;
         }
 
-        if ($helper !== null) {
-            $this->helper = $helper;
-        }
+        $this->sanitizer = $sanitizer;
     }
 
     public function getDateFormat($type = 'datetime'): string
@@ -93,7 +90,7 @@ class EntityCaster
                     }
                     break;
                 case 'text':
-                    $data[$field] = Sanitizer::sanitizeText((string) $value);
+                    $data[$field] = $this->sanitizer->sanitizeText((string) $value);
                     break;
                 case 'timestamp':
                     if (!is_int($value)) {
@@ -112,13 +109,13 @@ class EntityCaster
                 case 'html-full':
                 case 'html-basic':
                     if ($cast === 'html') {
-                        $data[$field] = Sanitizer::sanitizeHtml((string) $value);
+                        $data[$field] = $this->sanitizer->sanitizeHtml((string) $value);
                     } else {
-                        $data[$field] = Sanitizer::sanitizeHtml((string) $value, str_replace('html-', '', $cast));
+                        $data[$field] = $this->sanitizer->sanitizeHtml((string) $value, str_replace('html-', '', $cast));
                     }
                     break;
                 case 'key':
-                    $data[$field] = Sanitizer::sanitizeKey((string) $value);
+                    $data[$field] = $this->sanitizer->sanitizeKey((string) $value);
                     break;
                 case 'bool':
                 case 'int-bool':
@@ -312,9 +309,7 @@ class EntityCaster
         $handlers = $this->castHandlers;
 
         if (!isset($handlers[$cast])) {
-            throw new CastException(
-                "No such handler for '{$field}'. Invalid type: '{$cast}'"
-            );
+            throw new CastException("No such handler for '{$field}'. Invalid type: '{$cast}'");
         }
 
         $handler = $handlers[$cast];
@@ -323,7 +318,7 @@ class EntityCaster
             throw CastException::forInvalidInterface($handler);
         }
 
-        return $handler::$method($value, $params, $this->helper);
+        return $handler::$method($value, $params);
     }
 
     /**

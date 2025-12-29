@@ -3,14 +3,18 @@
 namespace App\Core\Action;
 
 use App\Core\Container\Container;
+use CodeIgniter\HTTP\CURLRequest;
+use CodeIgniter\Cache\CacheInterface;
 
 class ActionService
 {
     protected array $instantCallbacks  = [];
     protected array $deferredCallbacks = [];
 
-    protected ActionModel $model;
-    protected Container   $container;
+    protected Container      $container;
+    protected CURLRequest    $curl;
+    protected ActionModel    $model;
+    protected CacheInterface $cache;
 
     protected bool $hasPendingJobs = false;
 
@@ -18,10 +22,12 @@ class ActionService
     protected int $batchTimeout;
     protected int $batchSize;
 
-    public function __construct(ActionModel $model, Container $container)
+    public function __construct(Container $container, ActionModel $model, CacheInterface $cache, CURLRequest $curl)
     {
         $this->container = $container;
         $this->model     = $model;
+        $this->cache     = $cache;
+        $this->curl      = $curl;
 
         $this->batchSize     = 10;
         $this->batchTimeout  = 7200;
@@ -163,16 +169,15 @@ class ActionService
         }
 
         $now        = time();
-        $cache      = app('cache');
         $startTime  = $now;
         $maxRunTime = $timeLimit - 5;
 
         // Cleanup stuck actions
-        $lastCleanup = (int) $cache->get('actions_retry');
+        $lastCleanup = (int) $this->cache->get('actions_retry');
 
         if ($lastCleanup <= $now - $this->batchTimeout) {
             $this->model->retryActions($this->batchTimeout);
-            $cache->save('actions_retry', $now, $this->batchTimeout);
+            $this->cache->save('actions_retry', $now, $this->batchTimeout);
         }
 
         while ((time() - $startTime) < $maxRunTime) {
@@ -227,16 +232,15 @@ class ActionService
      */
     public function handleShutdown(): void
     {
-        $now   = time();
-        $cache = app('cache');
+        $now = time();
 
-        $lastTrigger = (int) $cache->get('actions_spawn');
+        $lastTrigger = (int) $this->cache->get('actions_spawn');
 
         if ($lastTrigger > $now - $this->batchInterval) {
             return;
         }
 
-        $cache->save('actions_spawn', $now, $this->batchInterval);
+        $this->cache->save('actions_spawn', $now, $this->batchInterval);
 
         // Ensure the script keeps running even if the user disconnects
         \ignore_user_abort(true);
@@ -274,8 +278,7 @@ class ActionService
     public function spawnWorker(): void
     {
         try {
-            $client = app('curlrequest');
-            $client->request('GET', site_url('actions/run'), [
+            $this->curl->request('GET', site_url('actions/run'), [
                 'query'       => ['key' => $this->getSpawnKey()],
                 'timeout'     => 0.1,
                 'verify'      => false,

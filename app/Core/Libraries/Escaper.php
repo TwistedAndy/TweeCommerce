@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Libraries;
+namespace App\Core\Libraries;
 
 /**
  * Escaper Library
@@ -14,7 +14,7 @@ class Escaper
      *
      * @return string
      */
-    public static function escapeHtml(string $string): string
+    public function escapeHtml(string $string): string
     {
         return htmlspecialchars($string, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
     }
