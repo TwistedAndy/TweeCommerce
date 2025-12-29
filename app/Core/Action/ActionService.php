@@ -13,7 +13,6 @@ class ActionService
     protected Container   $container;
 
     protected bool $hasPendingJobs = false;
-    protected bool $workerSpawned  = false;
 
     protected int $batchInterval;
     protected int $batchTimeout;
@@ -26,7 +25,7 @@ class ActionService
 
         $this->batchSize     = 10;
         $this->batchTimeout  = 7200;
-        $this->batchInterval = 60;
+        $this->batchInterval = 30;
 
         register_shutdown_function([$this, 'handleShutdown']);
     }
@@ -163,8 +162,18 @@ class ActionService
             $timeLimit = 1800;
         }
 
-        $startTime  = time();
+        $now        = time();
+        $cache      = app('cache');
+        $startTime  = $now;
         $maxRunTime = $timeLimit - 5;
+
+        // Cleanup stuck actions
+        $lastCleanup = (int) $cache->get('actions_retry');
+
+        if ($lastCleanup <= $now - $this->batchTimeout) {
+            $this->model->retryActions($this->batchTimeout);
+            $cache->save('actions_retry', $now, $this->batchTimeout);
+        }
 
         while ((time() - $startTime) < $maxRunTime) {
 
@@ -212,64 +221,91 @@ class ActionService
     }
 
     /**
-     * Flush callback buffer to the database and trigger a worker request
+     * Spawn a worker and retry failed actions on shutdown
      *
      * @return void
      */
     public function handleShutdown(): void
     {
-        if (rand(1, 100) === 1) {
-            $this->model->retryActions($this->batchTimeout);
-        }
+        $now   = time();
+        $cache = app('cache');
 
-        $this->spawnWorker();
-    }
-
-    /**
-     * Spawrn a worker
-     *
-     * @return void
-     */
-    protected function spawnWorker(): void
-    {
-        if ($this->workerSpawned) {
-            return;
-        }
-
-        $now = time();
-
-        $lastTrigger = (int) app('cache')->get('spawned_worker');
+        $lastTrigger = (int) $cache->get('actions_spawn');
 
         if ($lastTrigger > $now - $this->batchInterval) {
             return;
         }
 
-        $this->workerSpawned = true;
+        $cache->save('actions_spawn', $now, $this->batchInterval);
 
-        app('cache')->save('spawned_worker', $now, 60);
+        // Ensure the script keeps running even if the user disconnects
+        \ignore_user_abort(true);
 
-        $url    = site_url('actions/process');
-        $parts  = parse_url($url);
-        $secret = getenv('ACTION_SECRET') ? : 'default';
+        if (function_exists('\fastcgi_finish_request')) {
+            // FastCGI (Nginx/FPM)
+            \fastcgi_finish_request();
+        } elseif (function_exists('\litespeed_finish_request')) {
+            // LiteSpeed
+            \litespeed_finish_request();
+        } elseif (!headers_sent() and !\in_array(\PHP_SAPI, ['cli', 'phpdbg'], true)) {
+            // Prepare headers for connection closure
+            header('Connection: close');
 
-        $fp = @fsockopen(
-            ($parts['scheme'] === 'https' ? 'ssl://' : '') . $parts['host'],
-            $parts['port'] ?? ($parts['scheme'] === 'https' ? 443 : 80),
-            $errno,
-            $errstr,
-            0.01
-        );
+            // Disable compression to ensure length accuracy
+            header('Content-Encoding: none');
 
-        if ($fp) {
-            $out = "POST " . ($parts['path'] ?? '/') . " HTTP/1.1\r\n";
-            $out .= "Host: " . $parts['host'] . "\r\n";
-            $out .= "Content-Type: application/x-www-form-urlencoded\r\n";
-            $out .= "Content-Length: 0\r\n";
-            $out .= "X-Action-Secret: " . $secret . "\r\n";
-            $out .= "Connection: Close\r\n\r\n";
-            fwrite($fp, $out);
-            fclose($fp);
+            if (ob_get_level() > 0) {
+                header('Content-Length: ' . ob_get_length());
+                ob_end_flush();
+            } else {
+                header('Content-Length: 0');
+            }
+
+            flush();
         }
+
+        // Spawn a worker
+        $this->spawnWorker();
+    }
+
+    /**
+     * Spawn a worker to process actions
+     */
+    public function spawnWorker(): void
+    {
+        try {
+            $client = app('curlrequest');
+            $client->request('GET', site_url('actions/run'), [
+                'query'       => ['key' => $this->getSpawnKey()],
+                'timeout'     => 0.1,
+                'verify'      => false,
+                'http_errors' => false,
+                'user_agent'  => 'ActionWorker/1.0',
+            ]);
+        } catch (\Throwable $e) {
+            // Skip the timed out exceptions with code 28
+            if (!str_contains($e->getMessage(), '28')) {
+                log_message('error', 'Worker Spawn Error: ' . $e->getMessage(), ['exception' => $e]);
+            }
+        }
+    }
+
+    /**
+     * Check the spawn key
+     */
+    public function checkSpawnKey(string $key): bool
+    {
+        return $this->getSpawnKey() === $key;
+    }
+
+    /**
+     * Generate a spawn key
+     *
+     * @return string
+     */
+    protected function getSpawnKey(): string
+    {
+        return hash_hmac('sha256', floor(time() / 1000), getenv('ACTION_KEY') ?? 'default');
     }
 
     /**
@@ -281,30 +317,45 @@ class ActionService
             return;
         }
 
-        $now           = time();
-        $recurringTime = $action['recurring'];
+        $now       = time();
+        $recurring = $action['recurring'];
 
         // Use the original scheduled_at if available to prevent drift
         $baseTime = $action['scheduled_at'] ?? $now;
 
-        if (is_numeric($recurringTime)) {
-            $nextRun = $baseTime + (int) $recurringTime;
+        if (is_numeric($recurring) and $recurring > 0) {
+            $interval = (int) $recurring;
+            $nextRun  = $baseTime + $interval;
+
+            // If next run is in the past, jump to the future safely
+            if ($nextRun <= $now) {
+                // Calculate how many steps we missed and add them to the time
+                $missedSteps = floor(($now - $nextRun) / $interval) + 1;
+                $nextRun     += ($missedSteps * $interval);
+            }
         } else {
             // For string offsets like '+1 hour', use standard strtotime logic
-            $nextRun = strtotime($recurringTime, $baseTime);
+            $nextRun = strtotime($recurring, $baseTime);
 
             if ($nextRun === false) {
-                throw new ActionException('Failed to resolve the recurring time: ' . $recurringTime);
+                throw new ActionException('Failed to resolve the recurring time: ' . $recurring);
             }
 
-            if ($nextRun < $now and strpos($recurringTime, 'next') === false) {
-                $nextRun = strtotime('next ' . $recurringTime, $baseTime);
+            if ($nextRun <= $now and strpos($recurring, 'next') === false) {
+                $nextRun = strtotime('next ' . $recurring, $baseTime);
             }
 
-            if ($nextRun === false or $nextRun < $now) {
-                throw new ActionException('The recurring time is in the past: ' . $recurringTime);
-            }
+            $attempts = 0;
 
+            // Try to resolve the recurring time
+            while ($nextRun <= $now and $attempts < 10) {
+                $nextRun = strtotime($recurring, $nextRun);
+                $attempts++;
+            }
+        }
+
+        if ($nextRun === false or $nextRun < $now) {
+            throw new ActionException('The recurring time is in the past: ' . $recurring);
         }
 
         $action['scheduled_at'] = $nextRun;

@@ -8,14 +8,11 @@ class ActionController extends BaseController
 {
     public function run(ActionService $actions)
     {
-        $secret = $this->request->getHeaderLine('X-Action-Secret');
-
-        if ($secret !== (getenv('ACTION_SECRET') ? : 'default')) {
-            return $this->response->setStatusCode(403);
+        if ($actions->checkSpawnKey($this->request->getGet('key'))) {
+            $actions->runBatch();
+            return $this->response->setBody('OK');
+        } else {
+            return $this->response->setStatusCode(403)->setBody('Invalid Key');
         }
-
-        $actions->runBatch();
-
-        return $this->response->setBody('OK');
     }
 }
