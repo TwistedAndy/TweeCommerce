@@ -2,6 +2,8 @@
 
 namespace App\Core\Entity;
 
+use App\Core\Libraries\Escaper;
+
 /**
  * Interface EntityInterface
  *
@@ -10,59 +12,14 @@ namespace App\Core\Entity;
 interface EntityInterface
 {
     /**
-     * Get the primary key attribute
-     *
-     * @see https://codeigniter.com/user_guide/models/model.html#primarykey
+     * Get an entity caster
      */
-    public static function getEntityKey(): string;
+    public static function getCaster(): EntityCaster;
 
     /**
-     * Get the entity alias to be used as a base for database table names
+     * Get a normalized array with entity fields
      */
-    public static function getEntityAlias(): string;
-
-    /**
-     * Get default values for all entity attributes
-     */
-    public static function getEntityDefaults(): array;
-
-    /**
-     * Get validation rules for the entity
-     *
-     * @see https://codeigniter.com/user_guide/libraries/validation.html#validation-available-rules
-     */
-    public static function getEntityRules(): array;
-
-    /**
-     * Get validation messages for the entity
-     *
-     * @see https://codeigniter.com/user_guide/libraries/validation.html#setting-custom-error-messages
-     */
-    public static function getEntityMessages(): array;
-
-    /**
-     * Get the default entity casts
-     *
-     * @see https://codeigniter.com/user_guide/models/model.html#model-field-casting
-     */
-    public static function getEntityCasts(): array;
-
-    /**
-     * Get custom entity cast handlers
-     *
-     * @see https://codeigniter.com/user_guide/models/model.html#custom-casting
-     */
-    public static function getEntityCastHandlers(): array;
-
-    /**
-     * Get dynamic types supported by this entity
-     */
-    public static function getEntityTypes(): array;
-
-    /**
-     * Get dynamic statuses supported by this entity
-     */
-    public static function getEntityStatuses(): array;
+    public static function getFields(): array;
 
     /**
      * Initializes the entity and triggers one-time static data caching
@@ -70,7 +27,7 @@ interface EntityInterface
     public function __construct(?array $data = null);
 
     /**
-     * Get current entry attributes
+     * Get raw entry attributes
      */
     public function getAttributes(): array;
 
@@ -80,9 +37,14 @@ interface EntityInterface
     public function setAttributes(array $attributes): void;
 
     /**
+     * Get a raw entry attribute
+     */
+    public function getAttribute(string $key): mixed;
+
+    /**
      * Internal method to set a single attribute with change tracking and casting.
      */
-    public function setAttribute(string $attribute, mixed $newValue): bool;
+    public function setAttribute(string $key, mixed $value): bool;
 
     /**
      * Check if an attribute or a whole entity has changed
@@ -103,11 +65,6 @@ interface EntityInterface
      * Get all attributes with original values
      */
     public function getOriginal(): array;
-
-    /**
-     * Sync directly assigned object properties with attributes
-     */
-    public function syncOriginal(): void;
 
     /**
      * Restore original attributes

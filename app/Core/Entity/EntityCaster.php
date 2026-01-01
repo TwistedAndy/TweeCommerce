@@ -44,6 +44,7 @@ class EntityCaster
         foreach ($casts as $field => $cast) {
             if (str_starts_with($cast, '?')) {
                 $cast = ltrim($cast, '?');
+
                 $this->nullable[$field] = true;
             }
 
@@ -209,6 +210,30 @@ class EntityCaster
                         $row[$field] = (string) $value;
                     }
                     break;
+                case 'datetime':
+                case 'datetime-ms':
+                case 'datetime-us':
+                case 'timestamp':
+                    if (is_string($value) or is_numeric($value)) {
+                        try {
+                            if (is_numeric($value) and $cast === 'timestamp') {
+                                $row[$field] = Time::createFromTimestamp(
+                                    (int) $value,
+                                    date_default_timezone_get()
+                                );
+                            } else {
+                                $row[$field] = Time::createFromFormat(
+                                    self::getDateFormat($cast),
+                                    $value
+                                );
+                            }
+                        } catch (\Exception $exception) {
+                            $row[$field] = null;
+                        }
+                    } elseif (!($value instanceof Time)) {
+                        $row[$field] = null;
+                    }
+                    break;
                 case 'bool':
                 case 'int-bool':
                     if (!is_bool($value)) {
@@ -239,30 +264,6 @@ class EntityCaster
                         $row[$field] = unserialize($value, ['allowed_classes' => false]);
                     } elseif (!is_array($value)) {
                         $row[$field] = (array) $value;
-                    }
-                    break;
-                case 'datetime':
-                case 'datetime-ms':
-                case 'datetime-us':
-                case 'timestamp':
-                    if (is_string($value) or is_numeric($value)) {
-                        try {
-                            if (is_numeric($value) and $cast === 'timestamp') {
-                                $row[$field] = Time::createFromTimestamp(
-                                    (int) $value,
-                                    date_default_timezone_get()
-                                );
-                            } else {
-                                $row[$field] = Time::createFromFormat(
-                                    self::getDateFormat($cast),
-                                    $value
-                                );
-                            }
-                        } catch (\Exception $exception) {
-                            $row[$field] = null;
-                        }
-                    } elseif (!($value instanceof Time)) {
-                        $row[$field] = null;
                     }
                     break;
                 case 'csv':
@@ -296,7 +297,7 @@ class EntityCaster
         $params = [];
 
         if (preg_match('/\A(.+)\[(.+)]\z/', $cast, $matches)) {
-            $cast = $matches[1];
+            $cast   = $matches[1];
             $params = array_map('trim', explode(',', $matches[2]));
         }
 

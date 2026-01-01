@@ -2,13 +2,10 @@
 
 namespace App\Core\Entity;
 
-use App\Core\Container\ContainerException;
-use App\Exceptions\ValidationException;
-use CodeIgniter\Database\ConnectionInterface;
+use CodeIgniter\Model;
 use CodeIgniter\Database\Exceptions\DataException;
 use CodeIgniter\Exceptions\InvalidArgumentException;
-use CodeIgniter\Model;
-use CodeIgniter\Validation\ValidationInterface;
+
 use ReflectionException;
 
 class EntityModel extends Model
@@ -21,95 +18,52 @@ class EntityModel extends Model
     protected $dateFormat = 'int';
     protected $returnType = Entity::class;
 
-    protected $useSoftDeletes = false;
-    protected $protectFields = false;
+    protected $useSoftDeletes = true;
+    protected $useTimestamps  = true;
+    protected $protectFields  = false;
 
-    // Dates
-    protected $useTimestamps = true;
+    protected bool $isLocked = false;
 
     // Callbacks
-    protected $beforeFind = ['beforeFindHandler'];
-    protected $afterFind = ['afterFindHandler'];
-    protected $afterInsert = ['updateCacheHandler'];
-    protected $afterUpdate = ['updateCacheHandler'];
+    protected $beforeFind       = ['beforeFindHandler'];
+    protected $afterFind        = ['afterFindHandler'];
+    protected $afterInsert      = ['updateCacheHandler'];
+    protected $afterUpdate      = ['updateCacheHandler'];
     protected $afterUpdateBatch = ['updateCacheHandler'];
-    protected $afterDelete = ['deleteCacheHandler'];
-
-
-    public function __construct(ConnectionInterface $db = null, ValidationInterface $validation = null)
-    {
-        $entity = $this->returnType;
-
-        if (!is_subclass_of($entity, EntityInterface::class)) {
-            throw new \RuntimeException("{$entity} must implement EntityInterface.");
-        }
-
-        $this->table = $entity::getEntityKey() . 's';
-        $this->casts = $entity::getEntityCasts();
-        $this->primaryKey = $entity::getEntityKey();
-
-        $this->allowedFields = array_keys($entity::getEntityDefaults());
-        $this->validationRules = $entity::getEntityRules();
-        $this->validationMessages = $entity::getEntityMessages();
-
-        $this->dataCaster = new EntityCaster(
-            $this->casts,
-            $entity::getEntityCastHandlers(),
-            $db ?? \Config\Database::connect(),
-        );
-
-        parent::__construct($db, $validation);
-    }
+    protected $afterDelete      = ['deleteCacheHandler'];
 
     /**
      * Returns the id value for the data array or object
-     *
-     * @param array|object $row
-     *
-     * @return int|string|null
      */
-    public function getIdValue($row): int|string|null
+    public function getIdValue(mixed $row): int|string|null
     {
         if ($row instanceof EntityInterface) {
-            $attributes = $row->getAttributes();
-            $id = $attributes[$this->primaryKey] ?? null;
+            return $row->getAttribute($this->primaryKey);
         } elseif (is_array($row)) {
-            $id = $row[$this->primaryKey] ?? null;
+            return $row[$this->primaryKey] ?? null;
         } elseif (is_object($row) and isset($row->{$this->primaryKey})) {
-            $id = $row->{$this->primaryKey};
+            return $row->{$this->primaryKey};
         } else {
-            $id = parent::getIdValue($row);
-        }
-
-        return $id;
-    }
-
-    /**
-     * @param $row
-     *
-     * @return bool
-     * @throws ValidationException
-     */
-    public function save($row): bool
-    {
-        $this->validateData($row);
-
-        try {
-            return parent::save($row);
-        } catch (ReflectionException $exception) {
-            throw new ContainerException("Failed to reflect on callback: " . $exception->getMessage());
+            return null;
         }
     }
 
     /**
-     * Throw an exception on validation fail
+     * Configure a model once
      */
-    public function validateData($data): bool
+    public function configure(array $config): void
     {
-        if (!$this->validate($data)) {
-            throw new ValidationException($this->errors());
+        if ($this->isLocked) {
+            throw new EntityException('It is not possible to re-confirure the locked model.');
         }
-        return true;
+
+        foreach ($config as $field => $value) {
+            if (property_exists($this, $field)) {
+                $this->{$field} = $value;
+            }
+        }
+
+        $this->isLocked = true;
     }
 
     /**
@@ -134,9 +88,10 @@ class EntityModel extends Model
         $records = [];
 
         foreach ($ids as $id) {
-            if (is_numeric($id) or is_string($id)) {
-                if (isset(static::$entityCache[$id])) {
-                    $records[$id] = static::$entityCache[$id];
+            if (is_int($id) or is_string($id)) {
+                $key = $this->table . '_' . $id;
+                if (isset(static::$entityCache[$key])) {
+                    $records[$id] = static::$entityCache[$key];
                 } else {
                     return $data;
                 }
@@ -187,15 +142,15 @@ class EntityModel extends Model
 
         if (is_array($first) and !empty($first[$this->primaryKey])) {
             foreach ($rows as $id => $row) {
-                static::$entityCache[$id] = $row;
+                static::$entityCache[$this->table . '_' . $id] = $row;
             }
         } elseif ($first instanceof EntityInterface) {
             foreach ($rows as $id => $row) {
-                static::$entityCache[$id] = $row->getAttributes();
+                static::$entityCache[$this->table . '_' . $id] = $row->getAttributes();
             }
         } elseif ($first instanceof \CodeIgniter\Entity\Entity) {
             foreach ($rows as $id => $row) {
-                static::$entityCache[$id] = $row->toRawArray(false, false);
+                static::$entityCache[$this->table . '_' . $id] = $row->toRawArray(false, false);
             }
         }
 
@@ -226,16 +181,18 @@ class EntityModel extends Model
             /**
              * Process the regular inserts
              */
-            if (is_string($data['id']) or is_numeric($data['id'])) {
+            if (is_int($data['id']) or is_string($data['id'])) {
                 $row[$this->primaryKey] = $data['id'];
-                static::$entityCache[$data['id']] = $row;
+
+                static::$entityCache[$this->table . '_' . $data['id']] = $row;
                 return $data;
             }
 
             if (is_array($data['id'])) {
                 foreach ($data['id'] as $id) {
-                    if (isset(static::$entityCache[$id])) {
-                        static::$entityCache[$id] = array_merge(static::$entityCache[$id], $row);
+                    $key = $this->table . '_' . $id;
+                    if (isset(static::$entityCache[$key])) {
+                        static::$entityCache[$key] = array_merge(static::$entityCache[$key], $row);
                     }
                 }
             }
@@ -253,11 +210,12 @@ class EntityModel extends Model
                 continue;
             }
 
-            $id = $row[$this->primaryKey];
+            $id  = $row[$this->primaryKey];
+            $key = $this->table . '_' . $id;
 
-            if (isset(static::$entityCache[$id])) {
-                static::$entityCache[$id] = array_merge(
-                    static::$entityCache[$id],
+            if (isset(static::$entityCache[$key])) {
+                static::$entityCache[$key] = array_merge(
+                    static::$entityCache[$key],
                     $this->dataCaster->fromDataSource($row)
                 );
             }
@@ -277,7 +235,7 @@ class EntityModel extends Model
     {
         if (!empty($data['id']) and is_array($data['id'])) {
             foreach ($data['id'] as $id) {
-                unset(static::$entityCache[$id]);
+                unset(static::$entityCache[$this->table . '_' . $id]);
             }
         }
 
