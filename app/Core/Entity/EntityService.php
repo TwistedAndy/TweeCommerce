@@ -30,10 +30,10 @@ class EntityService
      */
     public static function getInstance(string $alias, array $config = []): self
     {
-        return static::$types[$alias] ?? Container::getInstance()->make(self::class, [
+        return static::$types[$alias] ?? Container::getInstance()->make(static::class, [
             'alias'  => $alias,
             'config' => $config,
-        ]);
+        ], static::class);
     }
 
     public function __construct(string $alias, array $config, Container $container, Sanitizer $sanitizer)
@@ -148,7 +148,7 @@ class EntityService
         $config['dateFormat']    = $this->dateFormat;
         $config['useTimestamps'] = $this->useTimestamps;
 
-        $this->entityModel = $container->make($modelClass);
+        $this->entityModel = $container->make($modelClass, [], static::class);
 
         $this->entityModel->configure($config);
 

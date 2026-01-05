@@ -220,7 +220,12 @@ class Container implements ContainerInterface
 
         // Check Class Existence (Autowiring)
         if (class_exists($id)) {
-            return true;
+            try {
+                return (new \ReflectionClass($id))->isInstantiable();
+            } catch (\ReflectionException $e) {
+                // Class exists but is broken/unusable
+                return false;
+            }
         }
 
         // Check Core Service Fallback
@@ -238,39 +243,41 @@ class Container implements ContainerInterface
      *
      * @param string|class-string<TClass> $abstract
      * @param array $parameters
+     * @param string $context A calling class name for contextual binding
      *
      * @return ($abstract is class-string<TClass> ? TClass : mixed)
      *
      * @throws ContainerException
      */
-    public function make(string $abstract, array $parameters = [])
+    public function make(string $abstract, array $parameters = [], string $context = '')
     {
-        // Check the cache for the abstract class first
-        if (isset($this->instances[$abstract])) {
+        if (isset($this->instances[$abstract]) and empty($parameters) and ($context === '' or !isset($this->contextual[$context][$abstract]))) {
             return $this->instances[$abstract];
         }
 
-        // Resolve bindings Alias/Interface -> Concrete Class
-        $concrete = $abstract;
-        $chain    = [];
-
-        while (is_string($concrete) and isset($this->bindings[$concrete])) {
-            if (isset($chain[$concrete])) {
-                throw new ContainerException("Circular binding detected: " . implode(' -> ', array_keys($chain)) . " -> $concrete");
+        if ($context === '' and isset($this->resolutionCache[$abstract])) {
+            $concrete = $this->resolutionCache[$abstract];
+        } else {
+            $concrete = $this->resolveConcrete($abstract, $context);
+            if ($context === '' and is_string($concrete) and empty($parameters)) {
+                $this->resolutionCache[$abstract] = $concrete;
             }
-            $chain[$concrete] = true;
-            $concrete         = $this->bindings[$concrete];
         }
 
-        // Fill the instance cache for singletons
-        if (is_string($concrete) and isset($this->instances[$concrete])) {
-            $this->instances[$abstract] = $this->instances[$concrete];
+        $isStringConcrete = is_string($concrete);
+
+        // Concrete Instance Check (e.g. Interface -> Alias -> Existing Singleton)
+        if ($isStringConcrete and isset($this->instances[$concrete])) {
+            if ($context === '' and $abstract !== $concrete) {
+                $this->instances[$abstract] = $this->instances[$concrete];
+            }
             return $this->instances[$concrete];
         }
 
-        // Detect circular dependencies using the normalized key
-        $stackKey = is_string($concrete) ? $concrete : $abstract;
+        // Build with Recursion Protection
+        $stackKey = $isStringConcrete ? $concrete : $abstract;
 
+        // Detect circular dependencies using the normalized key
         if (isset($this->buildStack[$stackKey])) {
             throw new ContainerException("Circular dependency detected: " . implode(' -> ', array_keys($this->buildStack)) . " -> $stackKey");
         }
@@ -292,19 +299,21 @@ class Container implements ContainerInterface
         }
 
         // Check if Shared (Singleton) OR Scoped
-        $isSingleton = (isset($this->singletons[$abstract]) or (is_string($concrete) and isset($this->singletons[$concrete])));
-        $isScoped    = (isset($this->scopedDefinitions[$abstract]) or (is_string($concrete) and isset($this->scopedDefinitions[$concrete])));
+        $isShared = (isset($this->singletons[$abstract]) or ($isStringConcrete and isset($this->singletons[$concrete])));
+        $isScoped = (isset($this->scopedDefinitions[$abstract]) or ($isStringConcrete and isset($this->scopedDefinitions[$concrete])));
 
-        if ($isSingleton or $isScoped) {
-            $this->instances[$abstract] = $object;
-            if (is_string($concrete)) {
+        if ($isShared or $isScoped) {
+            if ($isStringConcrete) {
                 $this->instances[$concrete] = $object;
+                if ($isScoped) {
+                    $this->scopedInstances[$concrete] = true;
+                }
             }
 
-            if ($isScoped) {
-                $this->scopedInstances[$abstract] = true;
-                if (is_string($concrete)) {
-                    $this->scopedInstances[$concrete] = true;
+            if ($context === '') {
+                $this->instances[$abstract] = $object;
+                if ($isScoped) {
+                    $this->scopedInstances[$abstract] = true;
                 }
             }
         }
@@ -323,11 +332,6 @@ class Container implements ContainerInterface
             foreach ($this->resolvingCallbacks[$className] as $callback) {
                 $callback($object, $this);
             }
-        }
-
-        // Save the class name to the resolution cache
-        if (empty($parameters)) {
-            $this->resolutionCache[$abstract] = $className;
         }
 
         return $object;
@@ -378,7 +382,7 @@ class Container implements ContainerInterface
             try {
                 if ($parsedClass) {
                     $reflector   = new \ReflectionMethod($parsedClass, $parsedMethod);
-                    $contextName = $callback;
+                    $contextName = $callbackKey ? : ($parsedClass . '::' . $parsedMethod);
                 } elseif (is_string($callback) and function_exists($callback)) {
                     $reflector   = new \ReflectionFunction($callback);
                     $contextName = $callback;
@@ -428,7 +432,11 @@ class Container implements ContainerInterface
             }
         }
 
-        return call_user_func_array($callback, $instances);
+        if (is_array($callback)) {
+            return call_user_func_array($callback, $instances);
+        }
+
+        return $callback(...$instances);
     }
 
     /**
@@ -443,6 +451,19 @@ class Container implements ContainerInterface
      */
     public function instance(string $abstract, mixed $instance): mixed
     {
+        // If replacing an existing object instance, remove its class-key mapping
+        if (isset($this->instances[$abstract]) and is_object($this->instances[$abstract])) {
+            $old = $this->instances[$abstract];
+            if (isset($this->instances[$old::class]) and $this->instances[$old::class] === $old) {
+                unset($this->instances[$old::class]);
+            }
+        }
+
+        // Clear stale cache
+        unset($this->scopedInstances[$abstract]);
+
+        $this->resolutionCache = [];
+
         $this->instances[$abstract] = $instance;
 
         if (is_object($instance)) {
@@ -475,12 +496,12 @@ class Container implements ContainerInterface
                 return $concrete($this, $parameters);
             }
 
-            return $concrete(...$parameters);
+            return $concrete(...array_values($parameters));
         }
 
         if (!class_exists($concrete)) {
             // If it's not a class, it might be a service alias or a dynamic service
-            $service = \service($concrete, ...$parameters);
+            $service = \service($concrete, ...array_values($parameters));
 
             if (is_object($service)) {
                 return $service;
@@ -507,6 +528,7 @@ class Container implements ContainerInterface
 
             if ($constructor === null) {
                 $this->parameterCache[$concrete] = [];
+                return new $concrete();
             }
 
             $this->parameterCache[$concrete] = $this->getReflectorParameters($constructor);
@@ -522,9 +544,14 @@ class Container implements ContainerInterface
         $args = $this->resolveDependencies($concrete, $cachedParams, $parameters);
 
         try {
-            return (new ReflectionClass($concrete))->newInstanceArgs($args);
-        } catch (ReflectionException $e) {
-            throw new ContainerException("Container failed to instantiate $concrete: " . $e->getMessage(), 0, $e);
+            return new $concrete(...$args);
+        } catch (\Error $e) {
+            // Try reflection to bypass visibility or get a better error message.
+            try {
+                return (new ReflectionClass($concrete))->newInstanceArgs($args);
+            } catch (ReflectionException $re) {
+                throw new ContainerException("Container failed to instantiate $concrete: " . $re->getMessage(), 0, $re);
+            }
         }
     }
 
@@ -538,6 +565,14 @@ class Container implements ContainerInterface
      */
     public function bind(string $abstract, string|callable|null $concrete = null, bool $shared = false): void
     {
+        // Clear stale cache
+        unset(
+            $this->instances[$abstract],
+            $this->scopedInstances[$abstract]
+        );
+
+        $this->resolutionCache = [];
+
         // Self-binding
         if (is_null($concrete)) {
             $concrete = $abstract;
@@ -674,6 +709,8 @@ class Container implements ContainerInterface
             $this->extenders[$abstract] = [];
         }
 
+        $this->resolutionCache = [];
+
         $this->extenders[$abstract][] = $closure;
 
         // Forget already created singletons, so they will be rebuilt next time
@@ -722,9 +759,7 @@ class Container implements ContainerInterface
             }
 
             foreach ($abstracts as $abstract) {
-                if (!in_array($abstract, $this->tags[$tag], true)) {
-                    $this->tags[$tag][] = $abstract;
-                }
+                $this->tags[$tag][$abstract] = true;
             }
         }
     }
@@ -741,7 +776,7 @@ class Container implements ContainerInterface
         $results = [];
 
         if (isset($this->tags[$tag])) {
-            foreach ($this->tags[$tag] as $abstract) {
+            foreach (array_keys($this->tags[$tag]) as $abstract) {
                 $results[] = $this->make($abstract);
             }
         }
@@ -784,6 +819,8 @@ class Container implements ContainerInterface
         $this->functionCache   = [];
         $this->parameterCache  = [];
         $this->resolutionCache = [];
+
+        $this->instances[static::class] = $this;
     }
 
     /**
@@ -805,7 +842,7 @@ class Container implements ContainerInterface
      */
     public function forgetInstances(): void
     {
-        $this->instances = [];
+        $this->instances = [static::class => $this];
     }
 
     /**
@@ -877,49 +914,48 @@ class Container implements ContainerInterface
      *
      * @param string $abstract
      * @param array $parameters
+     * @param string $context
      *
      * @return string
      */
-    public function getConcreteClass(string $abstract, array $parameters = []): string
+    public function getConcreteClass(string $abstract, array $parameters = [], string $context = ''): string
     {
         // Check the class resolution cache first
-        if (isset($this->resolutionCache[$abstract])) {
+        if ($context === '' and isset($this->resolutionCache[$abstract])) {
             return $this->resolutionCache[$abstract];
         }
 
+        $isCacheable = ($context === '' and empty($parameters));
+
         // If we have an object, we definitely know the class
-        if (isset($this->instances[$abstract])) {
-            $class                            = $this->instances[$abstract]::class;
-            $this->resolutionCache[$abstract] = $class;
+        if (isset($this->instances[$abstract]) and ($context === '' or !isset($this->contextual[$context][$abstract]))) {
+            $class = $this->instances[$abstract]::class;
+
+            if ($isCacheable) {
+                $this->resolutionCache[$abstract] = $class;
+            }
             return $class;
         }
 
-        // Resolve Binding Chain (Alias -> Interface -> Class)
-        $concrete = $abstract;
-        $chain    = [];
-
-        while (is_string($concrete) and isset($this->bindings[$concrete])) {
-            if (isset($chain[$concrete])) {
-                throw new ContainerException("Circular binding detected: " . implode(' -> ', array_keys($chain)) . " -> $concrete");
-            }
-            $chain[$concrete] = true;
-            $concrete         = $this->bindings[$concrete];
-        }
+        $concrete = $this->resolveConcrete($abstract, $context);
 
         // Return the string if it resolves to an actual class
-        // This prevents returning 'cache' (alias) instead of 'Config\Cache' (class)
         if (is_string($concrete) and class_exists($concrete)) {
-            $this->resolutionCache[$abstract] = $concrete;
+            if ($isCacheable) {
+                $this->resolutionCache[$abstract] = $concrete;
+            }
             return $concrete;
         }
 
-        // Delegate all complex resolution (Closures, CI4 Services, Factories) to make()
-        $object = $this->make($abstract, $parameters);
+        // If $concrete is a closure or an interface bound to a factory, we must build it to know the class
+        $object = $this->make($abstract, $parameters, $context);
 
         $class = $object::class;
 
         // Cache the class name for next time
-        $this->resolutionCache[$abstract] = $class;
+        if ($isCacheable) {
+            $this->resolutionCache[$abstract] = $class;
+        }
 
         return $class;
     }
@@ -968,6 +1004,10 @@ class Container implements ContainerInterface
                 } elseif ($count > 1) {
                     $resolvedType = $candidates;
                 }
+            } elseif ($type instanceof \ReflectionIntersectionType) {
+                // Intersection types cannot be easily auto-resolved.
+                // We treat them as unresolvable/builtin to force manual binding or fail gracefully.
+                $hasBuiltin = true;
             }
 
             $params[] = [
@@ -998,6 +1038,22 @@ class Container implements ContainerInterface
         $results      = [];
         $numericIndex = 0; // Cursor for positional arguments (0, 1, 2...)
 
+        $contextKey = $className;
+
+        if (!isset($this->contextual[$className])) {
+            if (str_contains($className, '::')) {
+                $parts = explode('::', $className, 2);
+                if (isset($this->contextual[$parts[0]])) {
+                    $contextKey = $parts[0];
+                }
+            } elseif (str_contains($className, '@')) {
+                $parts = explode('@', $className, 2);
+                if (isset($this->contextual[$parts[0]])) {
+                    $contextKey = $parts[0];
+                }
+            }
+        }
+
         foreach ($dependencies as $dep) {
 
             $name = $dep['name'];
@@ -1016,7 +1072,6 @@ class Container implements ContainerInterface
 
             // Variadic check must run before Class/Positional checks because it consumes multiple arguments.
             if ($dep['variadic']) {
-
                 // Manual Parameters passed to make(). If the user manually provided args, consume ALL remaining positional args.
                 if (array_key_exists($numericIndex, $parameters)) {
                     while (array_key_exists($numericIndex, $parameters)) {
@@ -1024,24 +1079,6 @@ class Container implements ContainerInterface
                         $numericIndex++;
                     }
                     continue;
-                }
-
-                // Contextual Array Binding. Allows binding an array of services: $container->bindWhen(..., [ServiceA::class, ServiceB::class])
-                if ($type !== null) {
-                    $lookupTypes = is_array($type) ? $type : [$type];
-
-                    foreach ($lookupTypes as $candidateType) {
-                        if (isset($this->contextual[$className][$candidateType])) {
-                            $bound = $this->contextual[$className][$candidateType];
-
-                            if (is_array($bound)) {
-                                foreach ($bound as $item) {
-                                    $results[] = is_string($item) ? $this->make($item) : $this->build($item, []);
-                                }
-                                continue 2; // Found a match, skip to next dependency
-                            }
-                        }
-                    }
                 }
 
                 continue;
@@ -1058,16 +1095,9 @@ class Container implements ContainerInterface
                         continue;
                     }
 
-                    // Contextual Binding
-                    if (isset($this->contextual[$className]) and isset($this->contextual[$className][$type])) {
-                        $concrete  = $this->contextual[$className][$type];
-                        $results[] = is_string($concrete) ? $this->make($concrete) : $this->build($concrete, []);
-                        continue;
-                    }
-
                     // Resolution
                     try {
-                        $results[] = $this->make($type);
+                        $results[] = $this->make($type, [], $contextKey);
                     } catch (ContainerException $e) {
                         if ($dep['nullable']) {
                             $results[] = null;
@@ -1106,17 +1136,8 @@ class Container implements ContainerInterface
                     // Attempt resolution of each candidate
                     if (!$resolved) {
                         foreach ($type as $candidate) {
-                            // Check Contextual
-                            if (isset($this->contextual[$className][$candidate])) {
-                                $concrete  = $this->contextual[$className][$candidate];
-                                $results[] = is_string($concrete) ? $this->make($concrete) : $this->build($concrete, []);
-                                $resolved  = true;
-                                break;
-                            }
-
-                            // Try to Make
                             try {
-                                $results[] = $this->make($candidate);
+                                $results[] = $this->make($candidate, [], $contextKey);
                                 $resolved  = true;
                                 break;
                             } catch (ContainerException $e) {
@@ -1157,4 +1178,44 @@ class Container implements ContainerInterface
         return $results;
     }
 
+    /**
+     * Resolve the concrete type for a given abstract alias
+     *
+     * @param string $abstract
+     * @param string $context
+     *
+     * @return string|callable
+     * @throws ContainerException
+     */
+    protected function resolveConcrete(string $abstract, string $context = ''): string|callable
+    {
+        // Contextual Binding
+        if ($context and isset($this->contextual[$context][$abstract])) {
+            $concrete = $this->contextual[$context][$abstract];
+            if (is_string($concrete) and isset($this->bindings[$concrete])) {
+                return $this->resolveConcrete($concrete, $context);
+            }
+            return $concrete;
+        }
+
+        // Global Binding
+        if (isset($this->bindings[$abstract])) {
+            $concrete = $this->bindings[$abstract];
+        } else {
+            return $abstract;
+        }
+
+        // Alias Binding
+        $chain = [];
+
+        while (is_string($concrete) and isset($this->bindings[$concrete])) {
+            if (isset($chain[$concrete])) {
+                throw new ContainerException("Circular binding detected: " . implode(' -> ', array_keys($chain)) . " -> $concrete");
+            }
+            $chain[$concrete] = true;
+            $concrete         = $this->bindings[$concrete];
+        }
+
+        return $concrete;
+    }
 }

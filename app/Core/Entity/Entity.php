@@ -135,12 +135,12 @@ class Entity implements EntityInterface, JsonSerializable
             throw new EntityException('No primary key is specified for an entity');
         }
 
-        $entityEscaper = $container->make(Escaper::class);
+        $entityEscaper = $container->make(Escaper::class, [], static::class);
 
         $entityCaster = $container->make(EntityCaster::class, [
             'casts'        => $fieldCasts,
             'castHandlers' => $castHandlers,
-        ]);
+        ], static::class);
 
         if ($resolveDefaults) {
 
