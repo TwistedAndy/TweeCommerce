@@ -76,11 +76,11 @@ class ActionService
         $now = time();
 
         // Prepare Callback and Payload
-        list($storedCallback, $storedPayload) = $this->prepareCallbackData($callback, $args);
+        [$storedCallback, $storedPayload] = $this->prepareCallbackData($callback, $args);
 
         // Validate scheduled time
-        if (is_string($scheduledAt)) {
-            $scheduledAt = strtotime($scheduledAt);
+        if (is_string($scheduledAt) and !is_numeric($scheduledAt)) {
+            $scheduledAt = (int) strtotime($scheduledAt);
         }
 
         if (empty($scheduledAt)) {
@@ -90,14 +90,16 @@ class ActionService
         if ($recurringTime) {
             if (is_string($recurringTime) and !is_numeric($recurringTime) and strtotime($recurringTime) === false) {
                 throw new ActionException("Invalid recurring string: $recurringTime");
-            } elseif (is_numeric($recurringTime)) {
+            }
+
+            if (is_numeric($recurringTime)) {
                 $recurringTime = (int) $recurringTime;
             }
         } else {
             $recurringTime = 0;
         }
 
-        $action = [
+        $data = [
             'action'       => $action,
             'callback'     => $storedCallback,
             'payload'      => $storedPayload,
@@ -107,10 +109,10 @@ class ActionService
         ];
 
         if ($recurringTime) {
-            $action['recurring'] = $recurringTime;
+            $data['recurring'] = $recurringTime;
         }
 
-        $this->model->deferBatch([$action]);
+        $this->model->deferBatch([$data]);
     }
 
     /**
@@ -135,7 +137,7 @@ class ActionService
 
                 foreach ($callbacks as $callback) {
                     // Convert the live callback into storage-ready format
-                    list($storedCallback, $storedPayload) = $this->prepareCallbackData($callback, $args);
+                    [$storedCallback, $storedPayload] = $this->prepareCallbackData($callback, $args);
 
                     $actions[] = [
                         'action'    => $action,
@@ -344,7 +346,7 @@ class ActionService
                 throw new ActionException('Failed to resolve the recurring time: ' . $recurring);
             }
 
-            if ($nextRun <= $now and strpos($recurring, 'next') === false) {
+            if ($nextRun <= $now and !str_contains($recurring, 'next')) {
                 $nextRun = strtotime('next ' . $recurring, $baseTime);
             }
 

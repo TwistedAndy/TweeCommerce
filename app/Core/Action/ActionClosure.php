@@ -220,7 +220,9 @@ class ActionClosure
                 if ($isFunction and $balance === 0 and $text === '}') {
                     // Standard "function() { ... }" closure
                     break;
-                } elseif (!$isFunction) {
+                }
+
+                if (!$isFunction) {
                     // Arrow functions end at the first terminator (;, ,) or unbalanced closing paren )
                     if ($text === ';' or $text === ',') {
                         $code = substr($code, 0, -1);

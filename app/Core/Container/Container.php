@@ -94,11 +94,11 @@ class Container implements ContainerInterface
         // Immediately register this instance to prevent re-instantiation attempts
         $this->instances[static::class] = $this;
 
-        if (\is_object($config)) {
+        if (is_object($config)) {
             $config = (array) $config;
         }
 
-        if (!\is_array($config)) {
+        if (!is_array($config)) {
             return;
         }
 
@@ -106,34 +106,34 @@ class Container implements ContainerInterface
         $this->bindings = $config['bindings'] ?? [];
 
         // Process Singletons (Convert list to lookup keys)
-        if (isset($config['singletons']) and \is_array($config['singletons'])) {
-            $this->singletons = \array_fill_keys($config['singletons'], true);
+        if (isset($config['singletons']) and is_array($config['singletons'])) {
+            $this->singletons = array_fill_keys($config['singletons'], true);
         }
 
         // Process Scoped Definitions (Convert list to lookup keys)
-        if (isset($config['scoped']) and \is_array($config['scoped'])) {
-            $this->scopedDefinitions = \array_fill_keys($config['scoped'], true);
+        if (isset($config['scoped']) and is_array($config['scoped'])) {
+            $this->scopedDefinitions = array_fill_keys($config['scoped'], true);
         }
 
         // Ensure no service is both a Singleton and Scoped
-        $overlap = \array_intersect_key($this->singletons, $this->scopedDefinitions);
+        $overlap = array_intersect_key($this->singletons, $this->scopedDefinitions);
         if (!empty($overlap)) {
-            $keys = \implode(', ', \array_keys($overlap));
+            $keys = implode(', ', array_keys($overlap));
             throw new ContainerException("Conflict: Services cannot be both Singleton and Scoped: [{$keys}]");
         }
 
         // Process Tags
-        if (isset($config['tags']) and \is_array($config['tags'])) {
+        if (isset($config['tags']) and is_array($config['tags'])) {
             foreach ($config['tags'] as $tag => $abstracts) {
                 $this->tag($abstracts, $tag);
             }
         }
 
         // Process Extensions
-        if (isset($config['extenders']) and \is_array($config['extenders'])) {
+        if (isset($config['extenders']) and is_array($config['extenders'])) {
             foreach ($config['extenders'] as $abstract => $closures) {
                 // Normalize to array if only one closure is provided
-                $closures = \is_array($closures) ? $closures : [$closures];
+                $closures = is_array($closures) ? $closures : [$closures];
                 foreach ($closures as $closure) {
                     $this->extend($abstract, $closure);
                 }
@@ -144,10 +144,10 @@ class Container implements ContainerInterface
     /**
      * Get the shared container instance
      */
-    public static function getInstance($config = null): Container
+    public static function getInstance($config = null): self
     {
         if (static::$instance === null) {
-            if ($config === null and \class_exists(\Config\Container::class)) {
+            if ($config === null and class_exists(\Config\Container::class)) {
                 $config = new \Config\Container();
             }
             static::$instance = new static($config);
@@ -162,7 +162,7 @@ class Container implements ContainerInterface
      *
      * @return void
      */
-    public static function setInstance(?Container $container = null): void
+    public static function setInstance(?self $container = null): void
     {
         static::$instance = $container;
     }
@@ -219,12 +219,12 @@ class Container implements ContainerInterface
         }
 
         // Check Class Existence (Autowiring)
-        if (\class_exists($id)) {
+        if (class_exists($id)) {
             return true;
         }
 
         // Check Core Service Fallback
-        if (\class_exists(\Config\Services::class) and \method_exists(\Config\Services::class, $id)) {
+        if (class_exists(\Config\Services::class) and method_exists(\Config\Services::class, $id)) {
             return true;
         }
 
@@ -254,25 +254,25 @@ class Container implements ContainerInterface
         $concrete = $abstract;
         $chain    = [];
 
-        while (\is_string($concrete) and isset($this->bindings[$concrete])) {
+        while (is_string($concrete) and isset($this->bindings[$concrete])) {
             if (isset($chain[$concrete])) {
-                throw new ContainerException("Circular binding detected: " . \implode(' -> ', \array_keys($chain)) . " -> $concrete");
+                throw new ContainerException("Circular binding detected: " . implode(' -> ', array_keys($chain)) . " -> $concrete");
             }
             $chain[$concrete] = true;
             $concrete         = $this->bindings[$concrete];
         }
 
         // Fill the instance cache for singletons
-        if (\is_string($concrete) and isset($this->instances[$concrete])) {
+        if (is_string($concrete) and isset($this->instances[$concrete])) {
             $this->instances[$abstract] = $this->instances[$concrete];
             return $this->instances[$concrete];
         }
 
         // Detect circular dependencies using the normalized key
-        $stackKey = \is_string($concrete) ? $concrete : $abstract;
+        $stackKey = is_string($concrete) ? $concrete : $abstract;
 
         if (isset($this->buildStack[$stackKey])) {
-            throw new ContainerException("Circular dependency detected: " . \implode(' -> ', \array_keys($this->buildStack)) . " -> $stackKey");
+            throw new ContainerException("Circular dependency detected: " . implode(' -> ', array_keys($this->buildStack)) . " -> $stackKey");
         }
 
         $this->buildStack[$stackKey] = true;
@@ -292,18 +292,18 @@ class Container implements ContainerInterface
         }
 
         // Check if Shared (Singleton) OR Scoped
-        $isSingleton = (isset($this->singletons[$abstract]) or (\is_string($concrete) and isset($this->singletons[$concrete])));
-        $isScoped    = (isset($this->scopedDefinitions[$abstract]) or (\is_string($concrete) and isset($this->scopedDefinitions[$concrete])));
+        $isSingleton = (isset($this->singletons[$abstract]) or (is_string($concrete) and isset($this->singletons[$concrete])));
+        $isScoped    = (isset($this->scopedDefinitions[$abstract]) or (is_string($concrete) and isset($this->scopedDefinitions[$concrete])));
 
         if ($isSingleton or $isScoped) {
             $this->instances[$abstract] = $object;
-            if (\is_string($concrete)) {
+            if (is_string($concrete)) {
                 $this->instances[$concrete] = $object;
             }
 
             if ($isScoped) {
                 $this->scopedInstances[$abstract] = true;
-                if (\is_string($concrete)) {
+                if (is_string($concrete)) {
                     $this->scopedInstances[$concrete] = true;
                 }
             }
@@ -349,14 +349,14 @@ class Container implements ContainerInterface
         $parsedMethod = null;
         $reflector    = null;
 
-        if (\is_string($callback)) {
+        if (is_string($callback)) {
             $callbackKey = $callback;
-            if (!\function_exists($callback)) {
-                if (\str_contains($callback, '@')) {
-                    [$parsedClass, $parsedMethod] = \explode('@', $callback);
-                } elseif (\str_contains($callback, '::')) {
-                    [$parsedClass, $parsedMethod] = \explode('::', $callback);
-                } elseif (\class_exists($callback)) {
+            if (!function_exists($callback)) {
+                if (str_contains($callback, '@')) {
+                    [$parsedClass, $parsedMethod] = explode('@', $callback);
+                } elseif (str_contains($callback, '::')) {
+                    [$parsedClass, $parsedMethod] = explode('::', $callback);
+                } elseif (class_exists($callback)) {
                     $parsedClass  = $callback;
                     $parsedMethod = $defaultMethod ?? '__invoke';
                 }
@@ -364,7 +364,7 @@ class Container implements ContainerInterface
         } else {
             $callbackKey = $this->getCallbackKey($callback);
 
-            if (\is_array($callback) and isset($callback[0]) and \is_string($callback[0])) {
+            if (is_array($callback) and isset($callback[0]) and is_string($callback[0])) {
                 $parsedClass  = $callback[0];
                 $parsedMethod = $callback[1] ?? '__invoke';
             }
@@ -379,20 +379,20 @@ class Container implements ContainerInterface
                 if ($parsedClass) {
                     $reflector   = new \ReflectionMethod($parsedClass, $parsedMethod);
                     $contextName = $callback;
-                } elseif (\is_string($callback) and \function_exists($callback)) {
+                } elseif (is_string($callback) and function_exists($callback)) {
                     $reflector   = new \ReflectionFunction($callback);
                     $contextName = $callback;
-                } elseif (\is_array($callback)) {
+                } elseif (is_array($callback)) {
                     $reflector   = new \ReflectionMethod($callback[0], $callback[1]);
                     $contextName = $callbackKey;
                 } elseif ($callback instanceof \Closure) {
                     $reflector   = new \ReflectionFunction($callback);
                     $contextName = 'Closure';
-                } elseif (\is_object($callback)) {
+                } elseif (is_object($callback)) {
                     $reflector   = new \ReflectionMethod($callback, '__invoke');
                     $contextName = $callbackKey;
                 } else {
-                    throw new ContainerException('Invalid callback provided to call(): ' . \serialize($callback));
+                    throw new ContainerException('Invalid callback provided to call(): ' . serialize($callback));
                 }
             } catch (ReflectionException $e) {
                 throw new ContainerException('Failed to reflect on callback: ' . $e->getMessage());
@@ -428,7 +428,7 @@ class Container implements ContainerInterface
             }
         }
 
-        return \call_user_func_array($callback, $instances);
+        return call_user_func_array($callback, $instances);
     }
 
     /**
@@ -445,7 +445,7 @@ class Container implements ContainerInterface
     {
         $this->instances[$abstract] = $instance;
 
-        if (\is_object($instance)) {
+        if (is_object($instance)) {
             $this->instances[$instance::class] = $instance;
 
             // Pre-fill the resolution cache since we know the class
@@ -470,38 +470,37 @@ class Container implements ContainerInterface
      */
     public function build(string|callable $concrete, array $parameters): object
     {
-        if (\is_callable($concrete)) {
+        if (is_callable($concrete)) {
             if ($concrete instanceof \Closure) {
                 return $concrete($this, $parameters);
-            } else {
-                return $concrete(...$parameters);
             }
+
+            return $concrete(...$parameters);
         }
 
-        if (!\class_exists($concrete)) {
+        if (!class_exists($concrete)) {
             // If it's not a class, it might be a service alias or a dynamic service
             $service = \service($concrete, ...$parameters);
 
-            if (\is_object($service)) {
+            if (is_object($service)) {
                 return $service;
             }
 
-            if (\interface_exists($concrete)) {
-                throw new NotFoundException("Service Resolution Failed: Interface '$concrete' is not bound to any implementation.");
+            if (interface_exists($concrete)) {
+                $message = "Service Resolution Failed: Interface '$concrete' is not bound to any implementation.";
             } else {
-                throw new NotFoundException("Service Resolution Failed: Class '$concrete' not found.");
+                $message = "Service Resolution Failed: Class '$concrete' not found.";
             }
+
+            throw new NotFoundException($message);
         }
 
         // Reflect the class once and cache the parameters
         if (!isset($this->parameterCache[$concrete])) {
-            try {
-                $reflector = new \ReflectionClass($concrete);
-                if (!$reflector->isInstantiable()) {
-                    throw new ContainerException("Service Resolution Failed: Class '$concrete' is not instantiable.");
-                }
-            } catch (ReflectionException $e) {
-                throw new ContainerException("Container failed to instantiate '$concrete': " . $e->getMessage(), 0, $e);
+            $reflector = new \ReflectionClass($concrete);
+
+            if (!$reflector->isInstantiable()) {
+                throw new ContainerException("Service Resolution Failed: Class '$concrete' is not instantiable.");
             }
 
             $constructor = $reflector->getConstructor();
@@ -540,7 +539,7 @@ class Container implements ContainerInterface
     public function bind(string $abstract, string|callable|null $concrete = null, bool $shared = false): void
     {
         // Self-binding
-        if (\is_null($concrete)) {
+        if (is_null($concrete)) {
             $concrete = $abstract;
         }
 
@@ -553,7 +552,7 @@ class Container implements ContainerInterface
 
         if ($shared) {
             $this->singletons[$abstract] = true;
-            if (\is_string($concrete)) {
+            if (is_string($concrete)) {
                 $this->singletons[$concrete] = true;
             }
         }
@@ -636,7 +635,7 @@ class Container implements ContainerInterface
      */
     public function scoped(string $abstract, string|callable|null $concrete = null): void
     {
-        if (\is_null($concrete)) {
+        if (is_null($concrete)) {
             $concrete = $abstract;
         }
 
@@ -646,7 +645,7 @@ class Container implements ContainerInterface
         // Mark it as scoped
         $this->scopedDefinitions[$abstract] = true;
 
-        if (\is_string($concrete)) {
+        if (is_string($concrete)) {
             $this->scopedDefinitions[$concrete] = true;
         }
     }
@@ -679,14 +678,14 @@ class Container implements ContainerInterface
 
         // Forget already created singletons, so they will be rebuilt next time
         $concrete = $abstract;
-        while (\is_string($concrete) and isset($this->bindings[$concrete])) {
+        while (is_string($concrete) and isset($this->bindings[$concrete])) {
             $concrete = $this->bindings[$concrete];
         }
 
         // Clear the abstract singleton
         if (isset($this->instances[$abstract])) {
 
-            if (\is_object($this->instances[$abstract])) {
+            if (is_object($this->instances[$abstract])) {
                 unset($this->instances[$this->instances[$abstract]::class]);
             }
 
@@ -694,7 +693,7 @@ class Container implements ContainerInterface
         }
 
         // Clear the concrete singleton
-        if (\is_string($concrete) and isset($this->instances[$concrete])) {
+        if (is_string($concrete) and isset($this->instances[$concrete])) {
             unset($this->instances[$concrete]);
         }
     }
@@ -709,11 +708,11 @@ class Container implements ContainerInterface
      */
     public function tag(array|string $abstracts, array|string $tags): void
     {
-        if (!\is_array($tags)) {
-            $tags = \array_slice(\func_get_args(), 1);
+        if (!is_array($tags)) {
+            $tags = array_slice(func_get_args(), 1);
         }
 
-        if (!\is_array($abstracts)) {
+        if (!is_array($abstracts)) {
             $abstracts = [$abstracts];
         }
 
@@ -723,7 +722,7 @@ class Container implements ContainerInterface
             }
 
             foreach ($abstracts as $abstract) {
-                if (!\in_array($abstract, $this->tags[$tag])) {
+                if (!in_array($abstract, $this->tags[$tag], true)) {
                     $this->tags[$tag][] = $abstract;
                 }
             }
@@ -804,7 +803,7 @@ class Container implements ContainerInterface
      *
      * @return void
      */
-    public function forgetInstances()
+    public function forgetInstances(): void
     {
         $this->instances = [];
     }
@@ -833,13 +832,15 @@ class Container implements ContainerInterface
      */
     public function getCallbackKey($callback): string|null
     {
-        if (\is_array($callback)) {
+        if (is_array($callback)) {
             if (isset($callback[0]) and isset($callback[1])) {
-                return (\is_object($callback[0]) ? \get_class($callback[0]) : $callback[0]) . '::' . $callback[1];
-            } else {
-                throw new ContainerException('Invalid callback arguments: ' . \serialize($callback));
+                return (is_object($callback[0]) ? get_class($callback[0]) : $callback[0]) . '::' . $callback[1];
             }
-        } elseif ($callback instanceof \Closure) {
+
+            throw new ContainerException('Invalid callback arguments: ' . serialize($callback));
+        }
+
+        if ($callback instanceof \Closure) {
             try {
                 $reflector = new \ReflectionFunction($callback);
             } catch (\ReflectionException $e) {
@@ -849,22 +850,26 @@ class Container implements ContainerInterface
             $file = $reflector->getFileName();
 
             // Do not cache serialized closures because they share the same file and line number
-            if (\str_contains($file, "eval()'d code")) {
+            if (str_contains($file, "eval()'d code")) {
                 return null;
             }
 
-            if (\defined('ROOTPATH')) {
-                $file = \str_replace(ROOTPATH, '', $file);
+            if (defined('ROOTPATH')) {
+                $file = str_replace(ROOTPATH, '', $file);
             }
 
             return 'closure_' . $file . ':' . $reflector->getStartLine();
-        } elseif (\is_string($callback)) {
-            return $callback;
-        } elseif (\is_object($callback)) {
-            return \get_class($callback) . '::__invoke';
-        } else {
-            return null;
         }
+
+        if (is_string($callback)) {
+            return $callback;
+        }
+
+        if (is_object($callback)) {
+            return get_class($callback) . '::__invoke';
+        }
+
+        return null;
     }
 
     /**
@@ -893,9 +898,9 @@ class Container implements ContainerInterface
         $concrete = $abstract;
         $chain    = [];
 
-        while (\is_string($concrete) and isset($this->bindings[$concrete])) {
+        while (is_string($concrete) and isset($this->bindings[$concrete])) {
             if (isset($chain[$concrete])) {
-                throw new ContainerException("Circular binding detected: " . \implode(' -> ', \array_keys($chain)) . " -> $concrete");
+                throw new ContainerException("Circular binding detected: " . implode(' -> ', array_keys($chain)) . " -> $concrete");
             }
             $chain[$concrete] = true;
             $concrete         = $this->bindings[$concrete];
@@ -903,7 +908,7 @@ class Container implements ContainerInterface
 
         // Return the string if it resolves to an actual class
         // This prevents returning 'cache' (alias) instead of 'Config\Cache' (class)
-        if (\is_string($concrete) and \class_exists($concrete)) {
+        if (is_string($concrete) and class_exists($concrete)) {
             $this->resolutionCache[$abstract] = $concrete;
             return $concrete;
         }
@@ -955,7 +960,7 @@ class Container implements ContainerInterface
                     }
                 }
 
-                $count = \count($candidates);
+                $count = count($candidates);
 
                 // If there's only one union type available, store it as a string
                 if ($count === 1) {
@@ -999,11 +1004,11 @@ class Container implements ContainerInterface
             $type = $dep['type_name'];
 
             // Named Parameters
-            if (\array_key_exists($name, $parameters)) {
+            if (array_key_exists($name, $parameters)) {
                 $results[] = $parameters[$name];
 
                 // Skip a positional value if it exists at the current cursor, so it doesn't accidentally shift to the next argument
-                if (\array_key_exists($numericIndex, $parameters)) {
+                if (array_key_exists($numericIndex, $parameters)) {
                     $numericIndex++;
                 }
                 continue;
@@ -1013,8 +1018,8 @@ class Container implements ContainerInterface
             if ($dep['variadic']) {
 
                 // Manual Parameters passed to make(). If the user manually provided args, consume ALL remaining positional args.
-                if (\array_key_exists($numericIndex, $parameters)) {
-                    while (\array_key_exists($numericIndex, $parameters)) {
+                if (array_key_exists($numericIndex, $parameters)) {
+                    while (array_key_exists($numericIndex, $parameters)) {
                         $results[] = $parameters[$numericIndex];
                         $numericIndex++;
                     }
@@ -1023,15 +1028,15 @@ class Container implements ContainerInterface
 
                 // Contextual Array Binding. Allows binding an array of services: $container->bindWhen(..., [ServiceA::class, ServiceB::class])
                 if ($type !== null) {
-                    $lookupTypes = \is_array($type) ? $type : [$type];
+                    $lookupTypes = is_array($type) ? $type : [$type];
 
                     foreach ($lookupTypes as $candidateType) {
                         if (isset($this->contextual[$className][$candidateType])) {
                             $bound = $this->contextual[$className][$candidateType];
 
-                            if (\is_array($bound)) {
+                            if (is_array($bound)) {
                                 foreach ($bound as $item) {
-                                    $results[] = \is_string($item) ? $this->make($item) : $this->build($item, []);
+                                    $results[] = is_string($item) ? $this->make($item) : $this->build($item, []);
                                 }
                                 continue 2; // Found a match, skip to next dependency
                             }
@@ -1045,9 +1050,9 @@ class Container implements ContainerInterface
             // Class Dependency (Auto-wiring)
             if ($type !== null) {
 
-                if (\is_string($type)) {
+                if (is_string($type)) {
                     // If the passed parameter at $numericIndex is an instance of the required type, use it!
-                    if (\array_key_exists($numericIndex, $parameters) and ($parameters[$numericIndex] instanceof $type or $dep['builtin'])) {
+                    if (array_key_exists($numericIndex, $parameters) and ($parameters[$numericIndex] instanceof $type or $dep['builtin'])) {
                         $results[] = $parameters[$numericIndex];
                         $numericIndex++;
                         continue;
@@ -1056,7 +1061,7 @@ class Container implements ContainerInterface
                     // Contextual Binding
                     if (isset($this->contextual[$className]) and isset($this->contextual[$className][$type])) {
                         $concrete  = $this->contextual[$className][$type];
-                        $results[] = \is_string($concrete) ? $this->make($concrete) : $this->build($concrete, []);
+                        $results[] = is_string($concrete) ? $this->make($concrete) : $this->build($concrete, []);
                         continue;
                     }
 
@@ -1074,11 +1079,11 @@ class Container implements ContainerInterface
                 }
 
                 // Process multiple union types (e.g. Logger|FileLogger)
-                if (\is_array($type)) {
+                if (is_array($type)) {
                     $resolved = false;
 
                     // Check passed parameters against ANY of the union types
-                    if (\array_key_exists($numericIndex, $parameters)) {
+                    if (array_key_exists($numericIndex, $parameters)) {
                         $passed  = $parameters[$numericIndex];
                         $isMatch = $dep['builtin'];
 
@@ -1104,7 +1109,7 @@ class Container implements ContainerInterface
                             // Check Contextual
                             if (isset($this->contextual[$className][$candidate])) {
                                 $concrete  = $this->contextual[$className][$candidate];
-                                $results[] = \is_string($concrete) ? $this->make($concrete) : $this->build($concrete, []);
+                                $results[] = is_string($concrete) ? $this->make($concrete) : $this->build($concrete, []);
                                 $resolved  = true;
                                 break;
                             }
@@ -1135,7 +1140,7 @@ class Container implements ContainerInterface
             }
 
             // Positional Parameters
-            if (\array_key_exists($numericIndex, $parameters)) {
+            if (array_key_exists($numericIndex, $parameters)) {
                 $results[] = $parameters[$numericIndex];
                 $numericIndex++; // Move cursor to the next argument
                 continue;

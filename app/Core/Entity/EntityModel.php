@@ -39,13 +39,17 @@ class EntityModel extends Model
     {
         if ($row instanceof EntityInterface) {
             return $row->getAttribute($this->primaryKey);
-        } elseif (is_array($row)) {
-            return $row[$this->primaryKey] ?? null;
-        } elseif (is_object($row) and isset($row->{$this->primaryKey})) {
-            return $row->{$this->primaryKey};
-        } else {
-            return null;
         }
+
+        if (is_array($row)) {
+            return $row[$this->primaryKey] ?? null;
+        }
+
+        if (is_object($row) and isset($row->{$this->primaryKey})) {
+            return $row->{$this->primaryKey};
+        }
+
+        return null;
     }
 
     /**
@@ -254,13 +258,17 @@ class EntityModel extends Model
     {
         if ($returnType === $this->returnType) {
             return new $returnType($this->dataCaster->fromDataSource($row));
-        } elseif ($returnType === 'array') {
-            return $this->dataCaster->fromDataSource($row);
-        } elseif ($returnType === 'object') {
-            return (object) $this->dataCaster->fromDataSource($row);
-        } else {
-            return parent::convertToReturnType($row, $returnType);
         }
+
+        if ($returnType === 'array') {
+            return $this->dataCaster->fromDataSource($row);
+        }
+
+        if ($returnType === 'object') {
+            return (object) $this->dataCaster->fromDataSource($row);
+        }
+
+        return parent::convertToReturnType($row, $returnType);
     }
 
     /**
@@ -295,7 +303,7 @@ class EntityModel extends Model
         if (is_object($row) and method_exists($row, 'toRawArray')) {
             $row = $row->toRawArray($onlyChanged, false);
         } elseif (is_object($row)) {
-            $row = $this->objectToArray($row, $onlyChanged, false);
+            $row = $this->objectToArray($row, $onlyChanged);
         }
 
         $row = $this->dataCaster->toDataSource((array) $row);

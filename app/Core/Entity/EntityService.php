@@ -30,11 +30,7 @@ class EntityService
      */
     public static function getInstance(string $alias, array $config = []): self
     {
-        if (isset(static::$types[$alias])) {
-            return static::$types[$alias];
-        }
-
-        return Container::getInstance()->make(self::class, [
+        return static::$types[$alias] ?? Container::getInstance()->make(self::class, [
             'alias'  => $alias,
             'config' => $config,
         ]);
@@ -51,9 +47,8 @@ class EntityService
         if (!empty($config['entity_class'])) {
             if (!is_string($config['entity_class']) or !is_subclass_of($config['entity_class'], EntityInterface::class)) {
                 throw new EntityException('The entity class should implement the EntityInterface');
-            } else {
-                $this->entityClass = $config['entity_class'];
             }
+            $this->entityClass = $config['entity_class'];
         } else {
             $this->entityClass = Entity::class;
         }
@@ -61,9 +56,8 @@ class EntityService
         if (!empty($config['model_class'])) {
             if (!is_string($config['model_class']) or !is_subclass_of($config['model_class'], EntityModel::class)) {
                 throw new EntityException('The model class should extend the EntityModel');
-            } else {
-                $modelClass = $config['model_class'];
             }
+            $modelClass = $config['model_class'];
         } else {
             $modelClass = EntityModel::class;
         }
@@ -94,7 +88,9 @@ class EntityService
 
             if (!array_key_exists('rules', $field)) {
                 continue;
-            } elseif (!is_array($field['rules']) or empty($field['rules']['rules'])) {
+            }
+
+            if (!is_array($field['rules']) or empty($field['rules']['rules'])) {
                 throw new EntityException("Failed to initialize field rules for '{$key}'");
             }
 

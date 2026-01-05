@@ -188,7 +188,7 @@ class Sanitizer
         $html = preg_replace('/<(img|video|audio|source|iframe)\b[^>]*?\s+(src|poster)\s*=\s*["\']\s*.{0,3}\s*["\'][^>]*>/siu', '', $html);
 
         // Remove orphaned ">" at the start of a line
-        $html = preg_replace('/^[\s"“\'`]*>/m', '', $html);
+        $html = preg_replace('/^[\s"“\'`]*>/um', '', $html);
 
         if (str_starts_with($html, '>') or str_starts_with($html, '">')) {
             $html = ltrim($html, '"> ');
@@ -230,11 +230,11 @@ class Sanitizer
 
             if ($isClose) {
                 // Handle Closing Tag
-                if ($stack && end($stack) === $tag) {
+                if ($stack and end($stack) === $tag) {
                     // Perfect match: pop stack and output
                     array_pop($stack);
                     $output .= "</$tag>";
-                } elseif (in_array($tag, $stack)) {
+                } elseif (in_array($tag, $stack, true)) {
                     // Implicit match: close nested tags until we find the match
                     // Example: <b><i>text</b> -> <b><i>text</i></b>
                     while (($popped = array_pop($stack)) !== $tag) {
@@ -243,19 +243,17 @@ class Sanitizer
                     $output .= "</$tag>";
                 }
                 // If not in stack, it's a stray </tag>. Do nothing (remove it).
-            } else {
+            } elseif (substr(trim($attrs), -1) === '/' && !$isSingle) {
                 // Handle Opening Tag
                 // Check for XHTML self-closing style <div /> on non-single tags
-                if (substr(trim($attrs), -1) === '/' && !$isSingle) {
-                    $cleanAttrs = rtrim(trim($attrs), '/');
-                    $output     .= "<$tag$cleanAttrs></$tag>";
-                } else {
-                    // Output the open tag
-                    $output .= "<$tag$attrs>";
-                    // Push to stack if it needs a closing tag later
-                    if (!$isSingle) {
-                        $stack[] = $tag;
-                    }
+                $cleanAttrs = rtrim(trim($attrs), '/');
+                $output     .= "<$tag$cleanAttrs></$tag>";
+            } else {
+                // Output the open tag
+                $output .= "<$tag$attrs>";
+                // Push to stack if it needs a closing tag later
+                if (!$isSingle) {
+                    $stack[] = $tag;
                 }
             }
         }
@@ -305,13 +303,10 @@ class Sanitizer
                 if ($top !== $tag) {
                     return true; // Error: Nesting mismatch (e.g., <b><i></b></i>)
                 }
-            } else {
+            } elseif (substr(trim($matches[0][$index]), -2, 1) !== '/') {
                 // Found opening tag <tag>
                 // Check if it's a self-closing XHTML tag like <div />
-                // We check the full match string for the trailing slash
-                if (substr(trim($matches[0][$index]), -2, 1) !== '/') {
-                    $stack[] = $tag;
-                }
+                $stack[] = $tag;
             }
         }
 
@@ -326,7 +321,7 @@ class Sanitizer
     {
         // Check the encoding first
         if (!mb_check_encoding($text, 'UTF-8')) {
-            $text = mb_convert_encoding($text, 'UTF-8', 'UTF-8');
+            $text = (string) mb_convert_encoding($text, 'UTF-8', 'UTF-8');
         }
 
         // Remove null bytes
@@ -367,7 +362,7 @@ class Sanitizer
      */
     protected function processStyle(string $html): string
     {
-        return preg_replace_callback('#(<style[^>]*>)(.*?)(</style>)#si', function ($matches) {
+        return preg_replace_callback('#(<style[^>]*>)(.*?)(</style>)#si', static function ($matches) {
 
             $styles = $matches[2] ?? '';
 
@@ -421,13 +416,13 @@ class Sanitizer
 
         $patterns = [
             // Clean the dangerous attributes like on
-            '/(<[a-z][a-z0-9]*\b[^>]*?)\K([\s\/]+(on[a-z]+|formaction|classid|dynsrc|lowsrc)\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+))/siu',
+            '/(<[a-z][a-z0-9]*\b[^>]*?)\K([\s\/]+(on[a-z]+|formaction|classid|dynsrc|lowsrc)\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+))/iu',
 
             // Check attributes, which may have a link
             '/(<[a-z][a-z0-9]*\b[^>]*?)\K([\s\/]+(href|src|style|action|data|formaction|background|cite|poster|xlink:href)\s*=\s*("[^"]*?(' . $this->protocolsCache . ')[^"]*?"|\'[^\']*?(' . $this->protocolsCache . ')[^\']*?\'|[^\s>]*?(' . $this->protocolsCache . ')[^\s>]*))/siu',
 
             // Check malformed attributes
-            '/(<[a-z][a-z0-9]*\b[^>]*?)\K([\s\/]+[a-z0-9_-]+\s*=\s*("[^"]*"|\'[^\']*\')[^\s>]+)/siu',
+            '/(<[a-z][a-z0-9]*\b[^>]*?)\K([\s\/]+[a-z0-9_-]+\s*=\s*("[^"]*"|\'[^\']*\')[^\s>]+)/iu',
         ];
 
         // Loop to handle nested attacks like <a href="java&#09;script:..."> or <img src="javajavascript:script:">

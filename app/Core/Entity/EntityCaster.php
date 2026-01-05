@@ -15,6 +15,7 @@ use CodeIgniter\DataCaster\Cast\TimestampCast;
 use CodeIgniter\DataCaster\Cast\URICast;
 use CodeIgniter\DataCaster\Exceptions\CastException;
 use CodeIgniter\I18n\Time;
+use DateTimeInterface;
 use JsonException;
 
 class EntityCaster
@@ -99,7 +100,7 @@ class EntityCaster
                             $data[$field] = (int) $value;
                         } elseif (is_string($value)) {
                             $data[$field] = strtotime($value);
-                        } elseif ($value instanceof \DateTimeInterface) {
+                        } elseif ($value instanceof DateTimeInterface) {
                             $data[$field] = $value->getTimestamp();
                         } else {
                             throw new CastException("The provided value '{$value}' for the field '{$field}' is not a correct timestamp");
@@ -145,7 +146,7 @@ class EntityCaster
                 case 'datetime':
                 case 'datetime-ms':
                 case 'datetime-us':
-                    if ($value instanceof \DateTimeInterface) {
+                    if ($value instanceof DateTimeInterface) {
                         $data[$field] = $value->format($this->getDateFormat($cast));
                     } else {
                         if (is_numeric($value)) {
@@ -223,11 +224,11 @@ class EntityCaster
                                 );
                             } else {
                                 $row[$field] = Time::createFromFormat(
-                                    self::getDateFormat($cast),
+                                    $this->getDateFormat($cast),
                                     $value
                                 );
                             }
-                        } catch (\Exception $exception) {
+                        } catch (\Throwable $exception) {
                             $row[$field] = null;
                         }
                     } elseif (!($value instanceof Time)) {

@@ -98,7 +98,7 @@ class Entity implements EntityInterface, JsonSerializable
             }
 
             if (str_contains($key, '_')) {
-                $method = str_replace(['-', '_', ' '], '', \ucwords($key, '-_ '));
+                $method = str_replace(['-', '_', ' '], '', ucwords($key, '-_ '));
             } else {
                 $method = ucfirst($key);
             }
@@ -383,9 +383,9 @@ class Entity implements EntityInterface, JsonSerializable
     {
         if ($key === null) {
             return count($this->original) > 0;
-        } else {
-            return array_key_exists($key, $this->original);
         }
+
+        return array_key_exists($key, $this->original);
     }
 
     /**
@@ -433,15 +433,15 @@ class Entity implements EntityInterface, JsonSerializable
         }
 
         if ($recursive) {
-            return array_map(function ($value) use ($onlyChanged, $recursive) {
+            return array_map(static function ($value) use ($onlyChanged, $recursive) {
                 if (is_object($value) and is_callable([$value, 'toRawArray'])) {
                     $value = $value->toRawArray($onlyChanged, $recursive);
                 }
                 return $value;
             }, $attributes);
-        } else {
-            return $attributes;
         }
+
+        return $attributes;
     }
 
     /**
