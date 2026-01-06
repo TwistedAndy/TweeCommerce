@@ -170,7 +170,6 @@ class Database extends Config
      *
      * @var array<string, mixed>
      */
-    /*
     public array $tests = [
         'DSN'         => '',
         'hostname'    => '127.0.0.1',
@@ -197,7 +196,6 @@ class Database extends Config
             'time'     => 'H:i:s',
         ],
     ];
-    */
 
     public function __construct()
     {

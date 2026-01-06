@@ -28,8 +28,8 @@ final class ExampleDatabaseTest extends CIUnitTestCase
     public function testSoftDeleteLeavesRow(): void
     {
         $model = new ExampleModel();
-        $this->setPrivateProperty($model, 'useSoftDeletes', true);
-        $this->setPrivateProperty($model, 'tempUseSoftDeletes', true);
+        self::setPrivateProperty($model, 'useSoftDeletes', true);
+        self::setPrivateProperty($model, 'tempUseSoftDeletes', true);
 
         /** @var stdClass $object */
         $object = $model->first();

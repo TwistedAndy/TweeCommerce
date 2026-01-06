@@ -852,12 +852,17 @@ class Container implements ContainerInterface
      */
     public function forgetScopedInstances(): void
     {
+        foreach ($this->scopedDefinitions as $abstract => $status) {
+            unset($this->instances[$abstract]);
+        }
+
         foreach ($this->scopedInstances as $abstract => $status) {
             unset($this->instances[$abstract]);
         }
 
         // Reset the tracker
         $this->scopedInstances = [];
+        $this->resolutionCache = [];
     }
 
     /**
@@ -1098,7 +1103,7 @@ class Container implements ContainerInterface
                     // Resolution
                     try {
                         $results[] = $this->make($type, [], $contextKey);
-                    } catch (ContainerException $e) {
+                    } catch (\Throwable $e) {
                         if ($dep['nullable']) {
                             $results[] = null;
                         } else {
@@ -1140,7 +1145,7 @@ class Container implements ContainerInterface
                                 $results[] = $this->make($candidate, [], $contextKey);
                                 $resolved  = true;
                                 break;
-                            } catch (ContainerException $e) {
+                            } catch (\Throwable $e) {
                                 // Continue to next candidate
                             }
                         }
