@@ -8,7 +8,28 @@
     columns="max"
     failOnRisky="true"
     failOnWarning="true"
-    cacheResult="false">
+    cacheDirectory="build/.phpunit.cache">
+	<coverage
+			includeUncoveredFiles="true"
+			pathCoverage="false"
+			ignoreDeprecatedCodeUnits="true"
+			disableCodeCoverageIgnore="true">
+		<report>
+			<clover outputFile="build/logs/clover.xml"/>
+			<php outputFile="build/logs/coverage.serialized"/>
+			<text outputFile="php://stdout" showUncoveredFiles="false"/>
+		</report>
+	</coverage>
+	<source>
+		<include>
+			<directory suffix=".php">./app</directory>
+		</include>
+		<exclude>
+			<directory suffix=".php">./app/Config</directory>
+			<directory suffix=".php">./app/Views</directory>
+			<file>./app/Config/Routes.php</file>
+		</exclude>
+	</source>
     <testsuites>
         <testsuite name="App">
             <directory>./tests</directory>

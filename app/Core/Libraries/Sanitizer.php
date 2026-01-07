@@ -247,7 +247,10 @@ class Sanitizer
                 // Handle Opening Tag
                 // Check for XHTML self-closing style <div /> on non-single tags
                 $cleanAttrs = rtrim(trim($attrs), '/');
-                $output     .= "<$tag$cleanAttrs></$tag>";
+                if ($cleanAttrs !== '') {
+                    $cleanAttrs = ' ' . trim($cleanAttrs);
+                }
+                $output .= "<$tag$cleanAttrs></$tag>";
             } else {
                 // Output the open tag
                 $output .= "<$tag$attrs>";
@@ -305,8 +308,11 @@ class Sanitizer
                 }
             } elseif (substr(trim($matches[0][$index]), -2, 1) !== '/') {
                 // Found opening tag <tag>
-                // Check if it's a self-closing XHTML tag like <div />
                 $stack[] = $tag;
+            } else {
+                // Found self-closing tag on a non-single tag (e.g. <div />)
+                // We want to balance (expand) these.
+                return true;
             }
         }
 
@@ -339,19 +345,13 @@ class Sanitizer
      */
     public function transliterate(string $text): string
     {
-        if (function_exists('normalizer_is_normalized') and !normalizer_is_normalized($text)) {
+        if (!normalizer_is_normalized($text)) {
             $text = normalizer_normalize($text);
         }
 
-        if (function_exists('transliterator_transliterate')) {
-            $result = transliterator_transliterate('Any-Latin; Latin-ASCII', $text);
-            if ($result !== false) {
-                return $result;
-            }
-        }
-
-        if (function_exists('iconv')) {
-            return iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $text);
+        $result = transliterator_transliterate('Any-Latin; Latin-ASCII', $text);
+        if ($result !== false) {
+            return $result;
         }
 
         return $text;
@@ -416,13 +416,13 @@ class Sanitizer
 
         $patterns = [
             // Clean the dangerous attributes like on
-            '/(<[a-z][a-z0-9]*\b[^>]*?)\K([\s\/]+(on[a-z]+|formaction|classid|dynsrc|lowsrc)\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+))/iu',
+            '/(<[a-z][a-z0-9]*\b[^>]*?)\K([\s\/]+(on[a-z]+|formaction|classid|dynsrc|lowsrc)\s*=\s*(\"[^\"]*\"|\'[^\']*\'|[^\s>]+))/iu',
 
             // Check attributes, which may have a link
-            '/(<[a-z][a-z0-9]*\b[^>]*?)\K([\s\/]+(href|src|style|action|data|formaction|background|cite|poster|xlink:href)\s*=\s*("[^"]*?(' . $this->protocolsCache . ')[^"]*?"|\'[^\']*?(' . $this->protocolsCache . ')[^\']*?\'|[^\s>]*?(' . $this->protocolsCache . ')[^\s>]*))/siu',
+            '/(<[a-z][a-z0-9]*\b[^>]*?)\K([\s\/]+(href|src|style|action|data|formaction|background|cite|poster|xlink:href)\s*=\s*(\"[^\"]*?(' . $this->protocolsCache . ')[^\"]*?\"|\'[^\']*?(' . $this->protocolsCache . ')[^\']*?\'|[^\s>]*?(' . $this->protocolsCache . ')[^\s>]*))/siu',
 
             // Check malformed attributes
-            '/(<[a-z][a-z0-9]*\b[^>]*?)\K([\s\/]+[a-z0-9_-]+\s*=\s*("[^"]*"|\'[^\']*\')[^\s>]+)/iu',
+            '/(<[a-z][a-z0-9]*\b[^>]*?)\K([\s\/]+[a-z0-9_-]+\s*=\s*(\"[^\"]*\"|\'[^\']*\')[^\s>]+)/iu',
         ];
 
         // Loop to handle nested attacks like <a href="java&#09;script:..."> or <img src="javajavascript:script:">

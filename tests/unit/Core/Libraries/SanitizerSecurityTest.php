@@ -17,6 +17,7 @@ namespace Tests\Unit\Core\Libraries;
 
 use App\Core\Libraries\Sanitizer;
 use CodeIgniter\Test\CIUnitTestCase;
+use PHPUnit\Framework\Attributes\DataProvider;
 
 /**
  * Extensive Security Test Suite for Sanitizer Library.
@@ -97,9 +98,7 @@ class SanitizerSecurityTest extends CIUnitTestCase
         }
     }
 
-    /**
-     * @dataProvider provideAttributeBasedPayloads
-     */
+    #[DataProvider('provideAttributeBasedPayloads')]
     public function testAttributeBasedXss(string $payload): void
     {
         $clean = $this->sanitizer->sanitizeHtml($payload);
@@ -138,9 +137,7 @@ class SanitizerSecurityTest extends CIUnitTestCase
         }
     }
 
-    /**
-     * @dataProvider provideBlindPayloads
-     */
+    #[DataProvider('provideBlindPayloads')]
     public function testBlindXss(string $payload): void
     {
         $clean = $this->sanitizer->sanitizeHtml($payload);
@@ -189,9 +186,7 @@ class SanitizerSecurityTest extends CIUnitTestCase
         }
     }
 
-    /**
-     * @dataProvider provideCookiePayloads
-     */
+    #[DataProvider('provideCookiePayloads')]
     public function testCookieBasedXss(string $payload): void
     {
         $clean = $this->sanitizer->sanitizeHtml($payload);
@@ -217,9 +212,7 @@ class SanitizerSecurityTest extends CIUnitTestCase
         }
     }
 
-    /**
-     * @dataProvider provideDomPayloads
-     */
+    #[DataProvider('provideDomPayloads')]
     public function testDomBasedXss(string $payload): void
     {
         $clean = $this->sanitizer->sanitizeHtml($payload);
@@ -246,9 +239,7 @@ class SanitizerSecurityTest extends CIUnitTestCase
         }
     }
 
-    /**
-     * @dataProvider provideMutationPayloads
-     */
+    #[DataProvider('provideMutationPayloads')]
     public function testMutationXss(string $payload): void
     {
         $clean = $this->sanitizer->sanitizeHtml($payload);
@@ -287,9 +278,7 @@ class SanitizerSecurityTest extends CIUnitTestCase
         }
     }
 
-    /**
-     * @dataProvider providePolyglotPayloads
-     */
+    #[DataProvider('providePolyglotPayloads')]
     public function testPolyglotXss(string $payload): void
     {
         $clean = $this->sanitizer->sanitizeHtml($payload);
@@ -321,9 +310,7 @@ class SanitizerSecurityTest extends CIUnitTestCase
         }
     }
 
-    /**
-     * @dataProvider providePostBasedPayloads
-     */
+    #[DataProvider('providePostBasedPayloads')]
     public function testPostBasedXss(string $payload): void
     {
         $clean = $this->sanitizer->sanitizeHtml($payload);
@@ -349,9 +336,7 @@ class SanitizerSecurityTest extends CIUnitTestCase
         }
     }
 
-    /**
-     * @dataProvider provideReflectedPayloads
-     */
+    #[DataProvider('provideReflectedPayloads')]
     public function testReflectedXss(string $payload): void
     {
         $clean = $this->sanitizer->sanitizeHtml($payload);
@@ -381,9 +366,7 @@ class SanitizerSecurityTest extends CIUnitTestCase
         }
     }
 
-    /**
-     * @dataProvider provideSelfPayloads
-     */
+    #[DataProvider('provideSelfPayloads')]
     public function testSelfXss(string $payload): void
     {
         $clean = $this->sanitizer->sanitizeHtml($payload);
@@ -409,9 +392,7 @@ class SanitizerSecurityTest extends CIUnitTestCase
         }
     }
 
-    /**
-     * @dataProvider provideUxssPayloads
-     */
+    #[DataProvider('provideUxssPayloads')]
     public function testUxss(string $payload): void
     {
         $clean = $this->sanitizer->sanitizeHtml($payload);
@@ -437,9 +418,7 @@ class SanitizerSecurityTest extends CIUnitTestCase
         }
     }
 
-    /**
-     * @dataProvider provideStylePayloads
-     */
+    #[DataProvider('provideStylePayloads')]
     public function testStyleSanitization(string $payload): void
     {
         $clean = $this->sanitizer->sanitizeHtml($payload);
@@ -472,9 +451,7 @@ class SanitizerSecurityTest extends CIUnitTestCase
         }
     }
 
-    /**
-     * @dataProvider provideCircularPayloads
-     */
+    #[DataProvider('provideCircularPayloads')]
     public function testCircularSanitization(string $payload): void
     {
         $clean = $this->sanitizer->sanitizeHtml($payload);
