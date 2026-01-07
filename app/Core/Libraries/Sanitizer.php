@@ -93,7 +93,7 @@ class Sanitizer
         $name = mb_strtolower($name, 'UTF-8');
 
         // Allow a-z, 0-9, dash, underscore, space. Remove everything else.
-        $name = preg_replace('/[^a-z0-9\- _]/u', '', $name);
+        $name = preg_replace('/[^a-z0-9\- _.]/u', '', $name);
 
         // Collapse multiple consecutive spaces, dashes, or underscores
         $name = preg_replace('/([ \-_])\1+/u', '$1', $name);
