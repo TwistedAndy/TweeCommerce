@@ -167,6 +167,39 @@ class ContainerFeaturesTest extends CIUnitTestCase
     }
 
     /**
+     * Tests that extending an alias clears the cached instance of the underlying concrete class.
+     * This covers the code:
+     * if (is_string($concrete) and isset($this->instances[$concrete])) { unset($this->instances[$concrete]); }
+     */
+    public function testExtendClearsConcreteSingletonWhenExtendingAlias(): void
+    {
+        // 1. Bind 'alias' to a concrete class
+        $this->container->bind('alias', FeatureTargetImpl::class);
+
+        // 2. Register the concrete class as a Singleton.
+        $this->container->singleton(FeatureTargetImpl::class, null);
+
+        // 3. Resolve the CONCRETE class directly to populate the cache.
+        $instance1 = $this->container->make(FeatureTargetImpl::class);
+
+        // 4. Extend the ALIAS.
+        // This should detect that the concrete class is already cached and clear it.
+        $this->container->extend('alias', function ($obj) {
+            $obj->extended = true;
+            return $obj;
+        });
+
+        // 5. Resolve via the ALIAS again.
+        // If the cache wasn't cleared, make() would return the old instance immediately
+        // without applying the new extender.
+        // Since it was cleared, it builds a new one and applies the extender.
+        $instance2 = $this->container->make('alias');
+
+        $this->assertNotSame($instance1, $instance2);
+        $this->assertTrue($instance2->extended);
+    }
+
+    /**
      * Tests manually swapping an instance (mocking).
      */
     public function testInstanceSwapping(): void
