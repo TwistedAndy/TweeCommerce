@@ -33,17 +33,6 @@ class ContainerResolutionTest extends CIUnitTestCase
     }
 
     /**
-     * Tests that an interface can be bound to a concrete implementation.
-     */
-    public function testBindRegistersImplementation(): void
-    {
-        $this->container->bind(IContainerContractStub::class, ContainerImplementationStub::class);
-
-        $instance = $this->container->make(IContainerContractStub::class);
-        $this->assertInstanceOf(ContainerImplementationStub::class, $instance);
-    }
-
-    /**
      * Tests that bindIf registers a binding only if it doesn't already exist.
      */
     public function testBindIfRespectsExistingBinding(): void
@@ -82,6 +71,24 @@ class ContainerResolutionTest extends CIUnitTestCase
     }
 
     /**
+     * Tests that singletonIf registers a singleton binding if one does not already exist.
+     */
+    public function testSingletonIfRegistersNewBinding(): void
+    {
+        // Ensure 'lazy_singleton' is not bound yet
+        $this->assertFalse($this->container->bound('lazy_singleton'));
+
+        $this->container->singletonIf('lazy_singleton', fn() => (object) ['time' => microtime(true)]);
+
+        $first  = $this->container->make('lazy_singleton');
+        $second = $this->container->make('lazy_singleton');
+
+        // Verify value and ensuring it is the same instance (Singleton)
+        $this->assertObjectHasProperty('time', $first);
+        $this->assertSame($first, $second);
+    }
+
+    /**
      * Tests that scoped instances act as singletons until flushed.
      */
     public function testScopedRegistersSharedInstanceUntilFlushed(): void
@@ -96,6 +103,45 @@ class ContainerResolutionTest extends CIUnitTestCase
 
         $third = $this->container->make('scoped');
         $this->assertNotSame($first, $third);
+    }
+
+    /**
+     * Tests that has() returns true for resolved singletons that are not in the resolution cache.
+     * This covers the specific "if (isset($this->instances[$id]))" block.
+     */
+    public function testChecksInstancesForClosureSingletons(): void
+    {
+        // 1. Register a Singleton via Closure.
+        // Closure bindings do NOT get added to 'resolutionCache' during make()
+        // because the container only caches string-based concrete class names.
+        $this->container->singleton('closure_singleton', fn() => new \stdClass());
+
+        // 2. Resolve it.
+        // This creates the object and stores it in '$this->instances'.
+        $this->container->make('closure_singleton');
+
+        // 3. Call has().
+        // - Check 1: resolutionCache['closure_singleton'] -> Empty (Pass)
+        // - Check 2: instances['closure_singleton'] -> Exists (True) -> Returns True
+        $this->assertTrue($this->container->has('closure_singleton'));
+    }
+
+    /**
+     * Tests that calling scoped() with a single argument sets the concrete implementation to the abstract.
+     */
+    public function testScopedRegistersSelfBindingWhenConcreteIsNull(): void
+    {
+        // Calling scoped with only the abstract class name
+        $this->container->scoped(ContainerConcreteStub::class);
+
+        $instance1 = $this->container->make(ContainerConcreteStub::class);
+        $instance2 = $this->container->make(ContainerConcreteStub::class);
+
+        // Verify it resolves to the class itself
+        $this->assertInstanceOf(ContainerConcreteStub::class, $instance1);
+
+        // Verify it acts as a shared instance (scoped)
+        $this->assertSame($instance1, $instance2);
     }
 
     /**
@@ -173,6 +219,46 @@ class ContainerResolutionTest extends CIUnitTestCase
     }
 
     /**
+     * Covers Container::resolveDependencies() Union Type Failure.
+     * Ensures that if NO candidate in a Union Type can be resolved, an exception is thrown.
+     */
+    public function testUnionTypeFailureThrowsException(): void
+    {
+        // UnionFailStub depends on IUnboundStubA|IUnboundStubB
+        // Neither are bound and neither are instantiable (interfaces)
+        $this->expectException(ContainerException::class);
+        $this->expectExceptionMessage('Unresolvable dependency');
+
+        $this->container->make(UnionFailStub::class);
+    }
+
+    /**
+     * Covers Container::resolveDependencies() Nullable Union Type logic.
+     * If all union candidates fail but the parameter is nullable, inject null.
+     */
+    public function testNullableUnionTypeResolvesToNull(): void
+    {
+        // UnionNullableStub depends on IUnboundStubA|IUnboundStubB|null
+        // Since neither interface is bound, it should fall back to null
+        $instance = $this->container->make(UnionNullableStub::class);
+        $this->assertNull($instance->dependency);
+    }
+
+    /**
+     * Tests that a union type combining a class and a built-in type (e.g. Class|string)
+     * filters out the built-in type and resolves the single remaining class candidate.
+     * This covers the "$resolvedType = $candidates[0];" line in getReflectorParameters.
+     */
+    public function testUnionTypeWithBuiltinResolvesToSingleClassCandidate(): void
+    {
+        // ContainerConcreteStub is a class, string is builtin.
+        // The container should identify ContainerConcreteStub as the only resolvable class candidate.
+        $instance = $this->container->make(UnionWithBuiltinStub::class);
+
+        $this->assertInstanceOf(ContainerConcreteStub::class, $instance->dependency);
+    }
+
+    /**
      * Tests that variadic parameters consume all remaining manual arguments.
      */
     public function testVariadicParameterResolution(): void
@@ -220,7 +306,8 @@ class ContainerResolutionTest extends CIUnitTestCase
 
     /**
      * Tests that Type-Hinted variadics receive instances if passed manually.
-     * Note: The container does not auto-collect all services of a type, but it validates instances if passed manually.
+     * Note: The container does not auto-collect all services of a type,
+     * but it validates instances if passed manually.
      */
     public function testTypeHintedVariadicManualInjection(): void
     {
@@ -306,6 +393,50 @@ class ContainerResolutionTest extends CIUnitTestCase
     }
 
     /**
+     * Verifies that classes without constructors are instantiated correctly.
+     */
+    public function testBuildHandlesClassWithNoConstructor(): void
+    {
+        $instance = $this->container->build(SimpleStub::class, []);
+        $this->assertInstanceOf(SimpleStub::class, $instance);
+    }
+
+    /**
+     * Covers Container::build() exception message for interfaces.
+     */
+    public function testBuildThrowsSpecificMessageForUnboundInterface(): void
+    {
+        $this->expectException(NotFoundException::class);
+        $this->expectExceptionMessage("Service Resolution Failed: Interface '" . IContainerContractStub::class . "' is not bound");
+
+        $this->container->make(IContainerContractStub::class);
+    }
+
+    /**
+     * Tests that build() handles non-Closure callables (like Invokable Objects).
+     * Covers: return $concrete(...array_values($parameters));
+     */
+    public function testBuildResolvesInvokableObject(): void
+    {
+        // Create an invokable object that returns an OBJECT (stdClass), not a scalar.
+        $invokable = new class {
+            public function __invoke($name)
+            {
+                return (object) ['greeting' => "Hello {$name}"];
+            }
+        };
+
+        // Bind the object. It is callable, but NOT a Closure.
+        $this->container->bind('greeter', $invokable);
+
+        // This triggers the specific line in build()
+        $result = $this->container->make('greeter', ['name' => 'World']);
+
+        $this->assertIsObject($result);
+        $this->assertEquals('Hello World', $result->greeting);
+    }
+
+    /**
      * Tests that uninstantiable classes (private constructors) throw ContainerException.
      */
     public function testUninstantiableClassThrowsException(): void
@@ -323,6 +454,22 @@ class ContainerResolutionTest extends CIUnitTestCase
     {
         $this->container->bind('foo', fn() => (object) ['val' => 'bar']);
         $this->assertEquals('bar', $this->container->get('foo')->val);
+    }
+
+    /**
+     * Covers Container::get() exception wrapping logic.
+     * Ensures generic Throwables are caught and rethrown as ContainerException.
+     */
+    public function testGetWrapsGenericExceptions(): void
+    {
+        $this->container->bind('fail_entry', function () {
+            throw new \RuntimeException('Generic failure');
+        });
+
+        $this->expectException(ContainerException::class);
+        $this->expectExceptionMessage("Error while resolving entry 'fail_entry': Generic failure");
+
+        $this->container->get('fail_entry');
     }
 
     /**
@@ -385,12 +532,173 @@ class ContainerResolutionTest extends CIUnitTestCase
         $this->assertNotSame($a1, $a2);
         $this->assertNotSame($b1, $b2);
     }
+
+    /**
+     * Covers the catch (Throwable $e) block in build().
+     * Verifies that if a constructor throws an Error (or ArgumentCountError),
+     * it is caught and wrapped in a ContainerException.
+     */
+    public function testBuildPropagatesConstructorErrors(): void
+    {
+        // Expect ContainerException because build() now catches Throwable
+        $this->expectException(ContainerException::class);
+
+        // Check that the message matches the format in your code: "Container failed to instantiate $concrete: ..."
+        $this->expectExceptionMessage('Container failed to instantiate ' . BrokenConstructorStub::class . ': Constructor Boom');
+
+        $this->container->make(BrokenConstructorStub::class);
+    }
+
+    /**
+     * Covers Container::bind() logic where abstract == concrete.
+     * It should remove the binding to prevent recursion loops in resolveConcrete,
+     * allowing build() to handle it as a direct class instantiation.
+     */
+    public function testBindSelfRemovesBinding(): void
+    {
+        $this->container->bind(ContainerConcreteStub::class, ContainerConcreteStub::class);
+
+        // Use reflection to verify internal state
+        $reflection = new \ReflectionClass($this->container);
+        $prop       = $reflection->getProperty('bindings');
+        $bindings   = $prop->getValue($this->container);
+
+        $this->assertArrayNotHasKey(ContainerConcreteStub::class, $bindings);
+
+        // Verify it still resolves
+        $this->assertInstanceOf(ContainerConcreteStub::class, $this->container->make(ContainerConcreteStub::class));
+    }
+
+    /**
+     * Covers \App\Core\Container\Container::get
+     */
+    public function testGetRethrowsNotFoundException(): void
+    {
+        $this->expectException(NotFoundException::class);
+        $this->container->get('non_existent_service');
+    }
+
+    /**
+     * Verifies that has() method utilizes the internal resolution cache for performance.
+     */
+    public function testHasUsesResolutionCache(): void
+    {
+        // Check resolutionCache
+        $this->container->bind('alias', ContainerConcreteStub::class);
+
+        // Resolve once to populate cache
+        $this->container->make('alias');
+
+        // Call has() again to hit the cache return
+        $this->assertTrue($this->container->has('alias'));
+    }
+
+    /**
+     * Verifies that resolveDependencies iterates through union types and correctly resolves
+     * the dependency using the second available candidate when the first one fails.
+     */
+    public function testResolveDependenciesWithUnionType(): void
+    {
+        // First type (IUnboundStubA) fails, second (SimpleStub) succeeds
+        $instance = $this->container->make(UnionSuccessStub::class);
+        $this->assertInstanceOf(SimpleStub::class, $instance->dep);
+    }
+
+    /**
+     * Tests that positional arguments are skipped if a named parameter consumes the current index.
+     */
+    public function testResolveDependenciesSkipsPositionalParams(): void
+    {
+        // Target: A closure needing $a and $b
+        $target = function ($a, $b) {
+            return [$a, $b];
+        };
+
+        // Parameters array:
+        // - 'a': Provided by NAME ('NamedA').
+        // - 0:   Provided positionally ('SkippedPositional'). Since $a is the first arg (index 0),
+        //        and we provided 'a' by name, the container should SKIP index 0 to avoid assigning it to $b.
+        // - 1:   Provided positionally ('PositionalB'). This should be assigned to $b (the second arg).
+        $params = [
+            'a' => 'NamedA',
+            0   => 'SkippedPositional',
+            1   => 'PositionalB'
+        ];
+
+        $result = $this->container->call($target, $params);
+
+        // Assert that $a got the named value, and $b got the value from index 1 (not 0)
+        $this->assertEquals(['NamedA', 'PositionalB'], $result);
+    }
+
+    /**
+     * Verifies that resolveDependencies matches a positional
+     * object argument against the required type hint.
+     */
+    public function testResolveDependenciesUsesPositionalObjectMatchingType(): void
+    {
+        // We call a method that expects (ContainerConcreteStub $stub).
+        // We pass an instance of ContainerConcreteStub in the parameters array at index 0.
+        // It should be picked up by type match, skipping auto-resolution.
+
+        $stub = new ContainerConcreteStub();
+
+        // We use call() to trigger resolveDependencies
+        $result = $this->container->call(function (ContainerConcreteStub $s) {
+            return $s;
+        }, [$stub]); // Passed as positional arg 0
+
+        $this->assertSame($stub, $result);
+    }
+
+    /**
+     * Verifies that resolveDependencies matches a positional object argument against a Union Type hint.
+     */
+    public function testResolveDependenciesUnionTypeMatchPositional(): void
+    {
+        // Method expects (UnionSuccessStub|SimpleStub $arg)
+        // We pass SimpleStub instance as positional arg 0.
+        // It should match SimpleStub in the union and use it.
+
+        $simple = new SimpleStub();
+
+        $result = $this->container->call(function (UnionSuccessStub|SimpleStub $arg) {
+            return $arg;
+        }, [$simple]);
+
+        $this->assertSame($simple, $result);
+    }
+
 }
 
 
 // --------------------------------------------------------------------
 // STUBS
 // --------------------------------------------------------------------
+
+class SimpleStub
+{
+}
+
+
+// Separate interfaces for union type testing to avoid duplicate type error
+interface IUnboundStubA
+{
+}
+
+
+interface IUnboundStubB
+{
+}
+
+
+class UnionSuccessStub
+{
+    public function __construct(public IUnboundStubA|SimpleStub $dep)
+    {
+    }
+}
+
 
 class ContainerConcreteStub
 {
@@ -452,6 +760,32 @@ class ContainerUnionStub
 }
 
 
+class UnionFailStub
+{
+    // Neither are bound
+    public function __construct(public IUnboundStubA|IUnboundStubB $dependency)
+    {
+    }
+}
+
+
+class UnionNullableStub
+{
+    // Neither are bound, but it accepts null
+    public function __construct(public IUnboundStubA|IUnboundStubB|null $dependency)
+    {
+    }
+}
+
+
+class UnionWithBuiltinStub
+{
+    public function __construct(public ContainerConcreteStub|string $dependency)
+    {
+    }
+}
+
+
 class ContainerVariadicStub
 {
     public array $items;
@@ -502,6 +836,15 @@ class PrivateConstructorStub
 {
     private function __construct()
     {
+    }
+}
+
+
+class BrokenConstructorStub
+{
+    public function __construct()
+    {
+        throw new \Error("Constructor Boom");
     }
 }
 

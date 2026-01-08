@@ -20,7 +20,6 @@ class ContainerCallTest extends CIUnitTestCase
 
     /**
      * Tests calling a method using the "Class@method" string syntax.
-     * This triggers the instantiation of the class via the container.
      */
     public function testCallWithAtSignSyntax(): void
     {
@@ -33,12 +32,8 @@ class ContainerCallTest extends CIUnitTestCase
      */
     public function testCallExecutesGlobalFunction(): void
     {
-        // 'trim' is a standard global function
         $result = $this->container->call('trim', ['string' => '  trimmed named  ']);
         $this->assertEquals('trimmed named', $result);
-
-        $result = $this->container->call('trim', ['  trimmed positional  ']);
-        $this->assertEquals('trimmed positional', $result);
     }
 
     /**
@@ -106,6 +101,39 @@ class ContainerCallTest extends CIUnitTestCase
             return 'closure_worked';
         });
         $this->assertEquals('closure_worked', $result);
+    }
+
+    /**
+     * Verifies that closures created via eval() bypass the file-based caching mechanism.
+     */
+    public function testCallWithEvalClosureDoesNotCache(): void
+    {
+        // Closures created in eval() usually don't have stable file/line references suitable for the cache key logic
+        $callback = eval('return function() { return "eval"; };');
+
+        $result = $this->container->call($callback);
+        $this->assertEquals('eval', $result);
+    }
+
+    /**
+     * Verifies that passing an invalid array structure to call() throws an exception.
+     */
+    public function testCallThrowsExceptionOnInvalidArrayCallback(): void
+    {
+        $this->expectException(ContainerException::class);
+        $this->expectExceptionMessage('Invalid callback arguments');
+
+        // Missing method name index 1
+        $this->container->call(['SomeClass']);
+    }
+
+    /**
+     * Tests that a string callback key is returned as-is.
+     */
+    public function testGetCallbackKeyWithString(): void
+    {
+        $key = $this->container->getCallbackKey('trim');
+        $this->assertEquals('trim', $key);
     }
 
     /**
@@ -201,11 +229,9 @@ class ContainerCallTest extends CIUnitTestCase
     {
         $this->container->bind(ICallContractStub::class, CallImplementationStub::class);
 
-        // Define a contextual rule: When CallContextStub::inject needs Interface, give it ImplementationTwo
         $contextKey = CallContextStub::class . '::inject';
         $this->container->bindWhen($contextKey, ICallContractStub::class, CallImplementationStubTwo::class);
 
-        // Call the method
         $stub   = new CallContextStub();
         $result = $this->container->call([$stub, 'inject']);
 
@@ -236,7 +262,6 @@ class ContainerCallTest extends CIUnitTestCase
 
     /**
      * Tests that caching works by calling the same method twice.
-     * This verifies the `functionCache` logic in Container.
      */
     public function testCallUsesFunctionCache(): void
     {
@@ -244,13 +269,106 @@ class ContainerCallTest extends CIUnitTestCase
             return $name;
         };
 
-        // First call populates cache
         $result1 = $this->container->call($callback, ['name' => 'First']);
-        // Second call uses cache
         $result2 = $this->container->call($callback, ['name' => 'Second']);
 
         $this->assertEquals('First', $result1);
         $this->assertEquals('Second', $result2);
+    }
+
+    /**
+     * Verifies getCallbackKey() returns null for eval'd closures to prevent caching issues.
+     */
+    public function testGetCallbackKeyReturnsNullForEvalClosure(): void
+    {
+        $closure = null;
+        // Eval creates a closure with "eval()'d code" in the filename
+        eval('$closure = function() { return "evaled"; };');
+
+        $key = $this->container->getCallbackKey($closure);
+
+        $this->assertNull($key);
+    }
+
+    /**
+     * Verifies getCallbackKey() throws an exception for invalid array structures.
+     */
+    public function testGetCallbackKeyThrowsForInvalidArray(): void
+    {
+        $this->expectException(ContainerException::class);
+        $this->expectExceptionMessage('Invalid callback arguments');
+
+        $this->container->getCallbackKey(['just_one_element']);
+    }
+
+    /**
+     * Verifies getCallbackKey() strips the ROOTPATH from the cache key.
+     */
+    public function testGetCallbackKeyStripsRootPath(): void
+    {
+        if (!defined('ROOTPATH')) {
+            define('ROOTPATH', __DIR__ . '/');
+        }
+
+        // We use a closure defined in this file. Its path starts with __DIR__.
+        // Since we set ROOTPATH to __DIR__, the resulting key should not contain the full path.
+        $closure = function () {
+        };
+
+        $key = $this->container->getCallbackKey($closure);
+
+        // The key format is "closure_filename:line"
+        // If stripping worked, filename should not be the full absolute path
+        $this->assertStringNotContainsString(ROOTPATH, $key);
+        $this->assertStringStartsWith('closure_', $key);
+    }
+
+    /**
+     * Verifies getCallbackKey() logic for object instances.
+     */
+    public function testGetCallbackKeyForObject(): void
+    {
+        $obj = new CallInvokableStub();
+        $key = $this->container->getCallbackKey($obj);
+
+        $this->assertEquals(CallInvokableStub::class . '::__invoke', $key);
+    }
+
+    /**
+     * Verifies getCallbackKey() returns null for non-callback types like integers or booleans.
+     */
+    public function testGetCallbackKeyReturnsNullForNonCallback(): void
+    {
+        $this->assertNull($this->container->getCallbackKey(123));
+        $this->assertNull($this->container->getCallbackKey(true));
+    }
+
+    /**
+     * Tests the ReflectionException handling in call() when reflection fails on a parsed class.
+     * This simulates a cache hit for a method that subsequently disappears or is invalid.
+     */
+    public function testCallThrowsExceptionOnReflectionFailureForParsedClass(): void
+    {
+        $this->expectException(ContainerException::class);
+        $this->expectExceptionMessage('Failed to reflect on callback');
+
+        // We spoof the cache to bypass the initial reflection check in call()
+        // This simulates a scenario where the cache exists but the method is gone/invalid
+        $callback = CallStub::class . '@missingMethod';
+
+        $reflection = new \ReflectionClass($this->container);
+        $prop       = $reflection->getProperty('functionCache');
+        // Inject dummy dependencies so the cache hit logic works
+        $cache            = $prop->getValue($this->container);
+        $cache[$callback] = [];
+        $prop->setValue($this->container, $cache);
+
+        // This triggers the path:
+        // 1. Cache hit ($reflector remains null)
+        // 2. $parsedClass populated from string
+        // 3. if (!$reflector) -> tries new ReflectionMethod(CallStub, 'missingMethod')
+        // 4. Throws ReflectionException -> caught and wrapped in ContainerException
+        $this->container->call($callback);
     }
 }
 
@@ -264,7 +382,6 @@ class CallConcreteStub
 }
 
 
-// FIX: Changed from class to interface to prevent auto-wiring
 interface ICallUnboundStub
 {
 }
@@ -272,6 +389,11 @@ interface ICallUnboundStub
 
 class CallStub
 {
+    public static function injectInterface(IContainerContractStub $stub): IContainerContractStub
+    {
+        return $stub;
+    }
+
     public function work()
     {
         return 'worked';

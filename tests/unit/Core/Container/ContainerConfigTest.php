@@ -13,10 +13,13 @@ use stdClass;
  */
 class ContainerConfigTest extends CIUnitTestCase
 {
+    protected Container $container;
+
     protected function setUp(): void
     {
         parent::setUp();
         Container::setInstance(null);
+        $this->container = Container::getInstance();
     }
 
     protected function tearDown(): void
@@ -27,20 +30,17 @@ class ContainerConfigTest extends CIUnitTestCase
 
     /**
      * Tests that the constructor correctly loads a full array configuration.
-     * This covers bindings, singletons, scoped definitions, tags, and extenders.
+     * Note: This test creates its OWN instance to pass config to the constructor.
      */
     public function testConstructLoadsConfiguration(): void
     {
         $config = [
-            // Bindings must be defined here
             'bindings'   => [
                 'interface'      => stdClass::class,
                 'shared'         => stdClass::class,
                 'scoped_service' => ConfigScopedStub::class,
             ],
-            // Singletons is a list of keys that are shared
             'singletons' => ['shared'],
-            // Scoped is a list of keys that are scoped
             'scoped'     => ['scoped_service'],
             'tags'       => ['my_tag' => ['shared', 'interface']],
             'extenders'  => [
@@ -62,15 +62,15 @@ class ContainerConfigTest extends CIUnitTestCase
         $s1 = $container->make('shared');
         $s2 = $container->make('shared');
         $this->assertSame($s1, $s2);
-        $this->assertTrue($s1->extended); // Verify Extender ran
+        $this->assertTrue($s1->extended);
 
         // Verify Scoped
         $sc1 = $container->make('scoped_service');
         $sc2 = $container->make('scoped_service');
-        $this->assertSame($sc1, $sc2); // Same within request
+        $this->assertSame($sc1, $sc2);
         $container->forgetScopedInstances();
         $sc3 = $container->make('scoped_service');
-        $this->assertNotSame($sc1, $sc3); // Different after flush
+        $this->assertNotSame($sc1, $sc3);
 
         // Verify Tags
         $this->assertCount(2, $container->tagged('my_tag'));
@@ -81,6 +81,9 @@ class ContainerConfigTest extends CIUnitTestCase
      */
     public function testConstructThrowsOnScopeConflict(): void
     {
+        // Clear instance to ensure getInstance triggers the private constructor
+        Container::setInstance(null);
+
         $this->expectException(ContainerException::class);
         $this->expectExceptionMessage('Conflict: Services cannot be both Singleton and Scoped');
 
@@ -89,8 +92,6 @@ class ContainerConfigTest extends CIUnitTestCase
             'scoped'     => ['foo']
         ];
 
-        // Clear instance to ensure getInstance triggers the private constructor
-        Container::setInstance(null);
         Container::getInstance($config);
     }
 
@@ -99,10 +100,9 @@ class ContainerConfigTest extends CIUnitTestCase
      */
     public function testGetConcreteClassReturnsClassNameForAlias(): void
     {
-        $container = Container::getInstance();
-        $container->bind('alias', stdClass::class);
+        $this->container->bind('alias', stdClass::class);
 
-        $this->assertEquals(stdClass::class, $container->getConcreteClass('alias'));
+        $this->assertEquals(stdClass::class, $this->container->getConcreteClass('alias'));
     }
 
     /**
@@ -110,13 +110,12 @@ class ContainerConfigTest extends CIUnitTestCase
      */
     public function testGetConcreteClassReturnsClassOfResolvedInstance(): void
     {
-        $container = Container::getInstance();
-        $container->singleton('shared', fn() => new stdClass());
+        $this->container->singleton('shared', fn() => new stdClass());
 
         // Resolve it first so it's in the instance cache
-        $container->make('shared');
+        $this->container->make('shared');
 
-        $this->assertEquals(stdClass::class, $container->getConcreteClass('shared'));
+        $this->assertEquals(stdClass::class, $this->container->getConcreteClass('shared'));
     }
 
     /**
@@ -124,24 +123,19 @@ class ContainerConfigTest extends CIUnitTestCase
      */
     public function testGetConcreteClassResolvesFactory(): void
     {
-        $container = Container::getInstance();
-        $container->bind('factory', fn() => new stdClass());
+        $this->container->bind('factory', fn() => new stdClass());
 
         // Should internally build the object to find its class
-        $this->assertEquals(stdClass::class, $container->getConcreteClass('factory'));
+        $this->assertEquals(stdClass::class, $this->container->getConcreteClass('factory'));
     }
 
     /**
-     * Tests that Intersection Types are treated as built-in/unresolvable, forcing manual override.
+     * Tests that Intersection Types are treated as built-in/unresolvable, forcing manual injection.
      */
     public function testIntersectionTypesForceManualBinding(): void
     {
-        $container = Container::getInstance();
-
-        // Attempting to resolve without parameters should fail because the container
-        // marks intersection types as 'builtin' (hard to auto-wire).
         try {
-            $container->make(ContainerIntersectionStub::class);
+            $this->container->make(ContainerIntersectionStub::class);
             $this->fail('Should have thrown ContainerException due to unresolvable intersection param');
         } catch (ContainerException $e) {
             $this->assertStringContainsString('missing a value', $e->getMessage());
@@ -149,47 +143,32 @@ class ContainerConfigTest extends CIUnitTestCase
 
         // It should work if we pass the parameter manually
         $param    = new ContainerIntersectionParam();
-        $instance = $container->make(ContainerIntersectionStub::class, ['param' => $param]);
+        $instance = $this->container->make(ContainerIntersectionStub::class, ['param' => $param]);
 
         $this->assertSame($param, $instance->param);
     }
 
     /**
-     * Tests that make() falls back to the global service() helper if the class is not found.
-     */
-    public function testMakeFallsBackToGlobalServiceHelper(): void
-    {
-        $container = Container::getInstance();
-
-        // 1. Framework Environment (Real service helper available)
-        if (function_exists('service')) {
-            // 'timer' is a standard CI4 service that requires no arguments
-            // Container sees 'timer' is not a class, so it calls service('timer')
-            $result = $container->make('timer');
-            $this->assertIsObject($result);
-            return;
-        }
-
-        // 2. Isolated Environment (Mock required)
-        // Define a global service() function dynamically for this test run
-        eval('function service($name) { return ($name === "mock_service_helper") ? new \stdClass() : null; }');
-
-        $result = $container->make('mock_service_helper');
-        $this->assertIsObject($result);
-    }
-
-    /**
      * Tests the fallback logic where build() calls the global service() function if the class doesn't exist.
-     * Since we cannot easily define the service() function if it doesn't exist, we expect NotFoundException.
      */
     public function testBuildThrowsNotFoundForUnknownString(): void
     {
-        $container = Container::getInstance();
-
         $this->expectException(NotFoundException::class);
         $this->expectExceptionMessage("Service Resolution Failed: Class 'UnknownServiceString' not found");
 
-        $container->make('UnknownServiceString');
+        $this->container->make('UnknownServiceString');
+    }
+
+    /**
+     * Tests that build() returns the object from the service() helper
+     * if the class does not exist but the service helper resolves it.
+     */
+    public function testBuildReturnsObjectFromServiceHelper(): void
+    {
+        $result = $this->container->make('mock_service_helper');
+
+        $this->assertIsObject($result);
+        $this->assertInstanceOf(\stdClass::class, $result);
     }
 
     /**
@@ -197,24 +176,58 @@ class ContainerConfigTest extends CIUnitTestCase
      */
     public function testHasChecksConfigServices(): void
     {
-        $serviceName = 'testService';
+        $serviceName = 'testService'; // Default from MockServices
 
-        // If Config\Services already exists (real app context), use an existing method
         if (class_exists(\Config\Services::class)) {
             $methods = get_class_methods(\Config\Services::class);
             if (!empty($methods)) {
                 $serviceName = $methods[0];
-            } else {
-                $this->markTestSkipped('Config\Services exists but has no methods to test.');
             }
-        } else {
-            // Otherwise, mock it dynamically for the unit test
-            eval('namespace Config; class Services { public static function testService() {} }');
         }
 
-        $container = Container::getInstance();
+        $this->assertTrue($this->container->has($serviceName));
+    }
 
-        $this->assertTrue($container->has($serviceName));
+    /**
+     * Tests scopedIf logic: registers only if not bound.
+     */
+    public function testScopedIf(): void
+    {
+        $this->container->scoped('foo', stdClass::class);
+
+        // Should ignore this binding
+        $this->container->scopedIf('foo', ConfigScopedStub::class);
+        $this->assertInstanceOf(stdClass::class, $this->container->make('foo'));
+
+        // Should register this one
+        $this->container->scopedIf('bar', ConfigScopedStub::class);
+        $this->assertInstanceOf(ConfigScopedStub::class, $this->container->make('bar'));
+    }
+
+    /**
+     * Verifies that the constructor handles invalid scalar
+     * configuration inputs gracefully (by ignoring them).
+     */
+    public function testConstructHandlesScalarConfig(): void
+    {
+        Container::setInstance(null);
+        // Passing a string 'config' should safely do nothing (not crash).
+        $container = Container::getInstance('invalid_config_string');
+        $this->assertInstanceOf(Container::class, $container);
+    }
+
+    /**
+     * Verifies that getConcreteClass() utilizes the internal resolution cache.
+     */
+    public function testGetConcreteClassUsesCache(): void
+    {
+        $this->container->bind('alias', stdClass::class);
+
+        // First call populates cache
+        $this->assertEquals(stdClass::class, $this->container->getConcreteClass('alias'));
+
+        // Second call hits cache
+        $this->assertEquals(stdClass::class, $this->container->getConcreteClass('alias'));
     }
 }
 
@@ -225,6 +238,18 @@ class ContainerConfigTest extends CIUnitTestCase
 
 class ConfigScopedStub
 {
+}
+
+
+/**
+ * Stub used to mock Config\Services via class_alias
+ */
+class MockServices
+{
+    public static function testService()
+    {
+        return true;
+    }
 }
 
 
@@ -272,22 +297,37 @@ class ContainerIntersectionParam implements StubIterator, StubCountable
 
 class ContainerIntersectionStub
 {
-    // Requires PHP 8.1+
     public function __construct(public StubIterator&StubCountable $param)
     {
     }
 }
 
+namespace App\Core\Container;
 
-/**
- * Mock for the CodeIgniter global service helper.
- */
-if (!function_exists('service')) {
+if (!function_exists('App\Core\Container\service')) {
+    /**
+     * This function sits in the same namespace as the Container class.
+     * When Container calls `service()`, PHP finds this function first.
+     */
     function service(string $name, ...$params)
     {
+        // 1. Intercept the specific test case
         if ($name === 'mock_service_helper') {
-            return new \stdClass(); // Return a dummy object to prove success
+            return new \stdClass();
         }
+
+        // 2. Fallback to Global Service (if available)
+        // This ensures normal framework behavior for other calls
+        if (function_exists('\service')) {
+            return \service($name, ...$params);
+        }
+
+        // 3. Fallback for Config\Services (Unit Test Mode)
+        // This handles cases where we mocked Config\Services via class_alias
+        if (class_exists('Config\Services') and method_exists('Config\Services', $name)) {
+            return \Config\Services::$name(...$params);
+        }
+
         return null;
     }
 }

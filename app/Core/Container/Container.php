@@ -3,9 +3,15 @@
 namespace App\Core\Container;
 
 use Psr\Container\ContainerInterface;
+use Closure;
+use Throwable;
 use ReflectionClass;
+use ReflectionMethod;
+use ReflectionFunction;
 use ReflectionException;
 use ReflectionFunctionAbstract;
+use ReflectionIntersectionType;
+use ReflectionUnionType;
 use ReflectionNamedType;
 
 class Container implements ContainerInterface
@@ -187,9 +193,7 @@ class Container implements ContainerInterface
 
         try {
             return $this->make($id);
-        } catch (NotFoundException $e) {
-            throw $e;
-        } catch (\Throwable $e) {
+        } catch (Throwable $e) {
             throw new ContainerException("Error while resolving entry '$id': " . $e->getMessage(), 0, $e);
         }
     }
@@ -220,12 +224,7 @@ class Container implements ContainerInterface
 
         // Check Class Existence (Autowiring)
         if (class_exists($id)) {
-            try {
-                return (new \ReflectionClass($id))->isInstantiable();
-            } catch (\ReflectionException $e) {
-                // Class exists but is broken/unusable
-                return false;
-            }
+            return (new ReflectionClass($id))->isInstantiable();
         }
 
         // Check Core Service Fallback
@@ -347,7 +346,7 @@ class Container implements ContainerInterface
      *
      * @return mixed
      */
-    public function call(mixed $callback, array $parameters = [], ?string $defaultMethod = null): mixed
+    public function call(callable|string|array $callback, array $parameters = [], ?string $defaultMethod = null): mixed
     {
         $parsedClass  = null;
         $parsedMethod = null;
@@ -381,19 +380,19 @@ class Container implements ContainerInterface
         } else {
             try {
                 if ($parsedClass) {
-                    $reflector   = new \ReflectionMethod($parsedClass, $parsedMethod);
+                    $reflector   = new ReflectionMethod($parsedClass, $parsedMethod);
                     $contextName = $callbackKey ? : ($parsedClass . '::' . $parsedMethod);
                 } elseif (is_string($callback) and function_exists($callback)) {
-                    $reflector   = new \ReflectionFunction($callback);
+                    $reflector   = new ReflectionFunction($callback);
                     $contextName = $callback;
                 } elseif (is_array($callback)) {
-                    $reflector   = new \ReflectionMethod($callback[0], $callback[1]);
+                    $reflector   = new ReflectionMethod($callback[0], $callback[1]);
                     $contextName = $callbackKey;
-                } elseif ($callback instanceof \Closure) {
-                    $reflector   = new \ReflectionFunction($callback);
+                } elseif ($callback instanceof Closure) {
+                    $reflector   = new ReflectionFunction($callback);
                     $contextName = 'Closure';
                 } elseif (is_object($callback)) {
-                    $reflector   = new \ReflectionMethod($callback, '__invoke');
+                    $reflector   = new ReflectionMethod($callback, '__invoke');
                     $contextName = $callbackKey;
                 } else {
                     throw new ContainerException('Invalid callback provided to call(): ' . serialize($callback));
@@ -412,24 +411,16 @@ class Container implements ContainerInterface
         $instances = $this->resolveDependencies($contextName, $dependencies, $parameters);
 
         if ($parsedClass) {
-            $needsInstantiation = true;
 
             if (!$reflector) {
                 try {
-                    $reflector = new \ReflectionMethod($parsedClass, $parsedMethod);
+                    $reflector = new ReflectionMethod($parsedClass, $parsedMethod);
                 } catch (ReflectionException $e) {
                     throw new ContainerException('Failed to reflect on callback: ' . $e->getMessage());
                 }
             }
 
-            if ($reflector->isStatic()) {
-                $needsInstantiation = false;
-                $callback           = [$parsedClass, $parsedMethod];
-            }
-
-            if ($needsInstantiation) {
-                $callback = [$this->make($parsedClass), $parsedMethod];
-            }
+            $callback = $reflector->isStatic() ? [$parsedClass, $parsedMethod] : [$this->make($parsedClass), $parsedMethod];
         }
 
         if (is_array($callback)) {
@@ -492,7 +483,7 @@ class Container implements ContainerInterface
     public function build(string|callable $concrete, array $parameters): object
     {
         if (is_callable($concrete)) {
-            if ($concrete instanceof \Closure) {
+            if ($concrete instanceof Closure) {
                 return $concrete($this, $parameters);
             }
 
@@ -501,7 +492,7 @@ class Container implements ContainerInterface
 
         if (!class_exists($concrete)) {
             // If it's not a class, it might be a service alias or a dynamic service
-            $service = \service($concrete, ...array_values($parameters));
+            $service = service($concrete, ...array_values($parameters));
 
             if (is_object($service)) {
                 return $service;
@@ -518,7 +509,7 @@ class Container implements ContainerInterface
 
         // Reflect the class once and cache the parameters
         if (!isset($this->parameterCache[$concrete])) {
-            $reflector = new \ReflectionClass($concrete);
+            $reflector = new ReflectionClass($concrete);
 
             if (!$reflector->isInstantiable()) {
                 throw new ContainerException("Service Resolution Failed: Class '$concrete' is not instantiable.");
@@ -536,22 +527,14 @@ class Container implements ContainerInterface
 
         $cachedParams = $this->parameterCache[$concrete];
 
-        // Skip the reflection entirely if there are no constructor arguments
-        if (empty($cachedParams)) {
-            return new $concrete();
-        }
-
-        $args = $this->resolveDependencies($concrete, $cachedParams, $parameters);
-
         try {
-            return new $concrete(...$args);
-        } catch (\Error $e) {
-            // Try reflection to bypass visibility or get a better error message.
-            try {
-                return (new ReflectionClass($concrete))->newInstanceArgs($args);
-            } catch (ReflectionException $re) {
-                throw new ContainerException("Container failed to instantiate $concrete: " . $re->getMessage(), 0, $re);
+            if (!empty($cachedParams)) {
+                $args = $this->resolveDependencies($concrete, $cachedParams, $parameters);
+                return new $concrete(...$args);
             }
+            return new $concrete();
+        } catch (Throwable $e) {
+            throw new ContainerException("Container failed to instantiate $concrete: " . $e->getMessage(), 0, $e);
         }
     }
 
@@ -871,6 +854,8 @@ class Container implements ContainerInterface
      * @param callable|string|object|array $callback
      *
      * @return string|null
+     *
+     * @throws ContainerException
      */
     public function getCallbackKey($callback): string|null
     {
@@ -882,12 +867,14 @@ class Container implements ContainerInterface
             throw new ContainerException('Invalid callback arguments: ' . serialize($callback));
         }
 
-        if ($callback instanceof \Closure) {
-            try {
-                $reflector = new \ReflectionFunction($callback);
-            } catch (\ReflectionException $e) {
-                throw new ContainerException('Failed to reflect on callback: ' . $e->getMessage());
-            }
+        if ($callback instanceof Closure) {
+
+            /**
+             * @noinspection PhpUnhandledExceptionInspection
+             *
+             * ReflectionFunction() almost never throws an exception on closures
+             */
+            $reflector = new ReflectionFunction($callback);
 
             $file = $reflector->getFileName();
 
@@ -988,7 +975,7 @@ class Container implements ContainerInterface
                 } else {
                     $hasBuiltin = true;
                 }
-            } elseif ($type instanceof \ReflectionUnionType) {
+            } elseif ($type instanceof ReflectionUnionType) {
                 // Union: Collect all valid classes
                 $candidates = [];
                 foreach ($type->getTypes() as $unionType) {
@@ -1009,7 +996,7 @@ class Container implements ContainerInterface
                 } elseif ($count > 1) {
                     $resolvedType = $candidates;
                 }
-            } elseif ($type instanceof \ReflectionIntersectionType) {
+            } elseif ($type instanceof ReflectionIntersectionType) {
                 // Intersection types cannot be easily auto-resolved.
                 // We treat them as unresolvable/builtin to force manual binding or fail gracefully.
                 $hasBuiltin = true;
@@ -1037,6 +1024,8 @@ class Container implements ContainerInterface
      * @param array $parameters
      *
      * @return array
+     *
+     * @throws ContainerException
      */
     protected function resolveDependencies(string $className, array $dependencies, array $parameters): array
     {
@@ -1103,11 +1092,11 @@ class Container implements ContainerInterface
                     // Resolution
                     try {
                         $results[] = $this->make($type, [], $contextKey);
-                    } catch (\Throwable $e) {
+                    } catch (Throwable $e) {
                         if ($dep['nullable']) {
                             $results[] = null;
                         } else {
-                            throw $e;
+                            throw new ContainerException("Unresolvable dependency: Parameter '\${$name}' in '{$className}' could not be resolved. Error: " . $e->getMessage());
                         }
                     }
                     continue;
@@ -1145,7 +1134,7 @@ class Container implements ContainerInterface
                                 $results[] = $this->make($candidate, [], $contextKey);
                                 $resolved  = true;
                                 break;
-                            } catch (\Throwable $e) {
+                            } catch (Throwable $e) {
                                 // Continue to next candidate
                             }
                         }

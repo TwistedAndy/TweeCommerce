@@ -273,6 +273,47 @@ class ContextualResolutionTest extends CIUnitTestCase
     }
 
     /**
+     * Tests that contextual binding works when the caller is defined via "Class@method" syntax,
+     * but the binding is defined on the Class.
+     * Covers: elseif (str_contains($className, '@')) { ... }
+     */
+    public function testContextualBindingWithAtSignSyntaxOnClass(): void
+    {
+        // 1. Bind Global Default: IContextWorker -> ContextWorkerA
+        $this->container->bind(IContextWorker::class, ContextWorkerA::class);
+
+        // 2. Bind Context: When 'ContextWorkerA' (the class) needs 'IContextWorker', give 'ContextWorkerB'
+        // We bind to the CLASS, not the method string.
+        $this->container->bindWhen(ContextWorkerA::class, IContextWorker::class, ContextWorkerB::class);
+
+        // 3. Call using string syntax "Class@handle"
+        // The container sees "ContextWorkerA@handle" is not bound directly in context,
+        // so it splits on '@', extracts "ContextWorkerA", and finds the binding.
+        $result = $this->container->call(ContextWorkerA::class . '@handle');
+
+        $this->assertInstanceOf(ContextWorkerB::class, $result);
+    }
+
+    /**
+     * Tests that contextual binding works when the caller is defined
+     * via "Class::method" syntax, but the binding is defined on the Class.
+     * Covers: if (isset($this->contextual[$parts[0]])) { $contextKey = $parts[0]; }
+     */
+    public function testContextualBindingWithDoubleColonSyntaxOnClass(): void
+    {
+        $this->container->bind(IContextWorker::class, ContextWorkerA::class);
+
+        // Bind to the CLASS
+        $this->container->bindWhen(ContextWorkerA::class, IContextWorker::class, ContextWorkerB::class);
+
+        // Call using string syntax "Class::staticHandle"
+        // The container splits "ContextWorkerA::staticHandle" and finds the context for "ContextWorkerA".
+        $result = $this->container->call(ContextWorkerA::class . '::staticHandle');
+
+        $this->assertInstanceOf(ContextWorkerB::class, $result);
+    }
+
+    /**
      * Tests manual context passing to the make() method.
      * This verifies that passing a string as the 3rd argument triggers context binding.
      */
