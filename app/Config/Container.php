@@ -94,7 +94,6 @@ class Container extends BaseConfig
         \CodeIgniter\Format\Format::class,
 
         // Application Classes
-        \App\Core\Libraries\Escaper::class,
         \App\Core\Libraries\Sanitizer::class
     ];
 

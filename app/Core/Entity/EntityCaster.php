@@ -3,45 +3,23 @@
 namespace App\Core\Entity;
 
 use App\Core\Libraries\Sanitizer;
-use CodeIgniter\DataCaster\Cast\ArrayCast;
-use CodeIgniter\DataCaster\Cast\BooleanCast;
-use CodeIgniter\DataCaster\Cast\CSVCast;
-use CodeIgniter\DataCaster\Cast\DatetimeCast;
-use CodeIgniter\DataCaster\Cast\FloatCast;
-use CodeIgniter\DataCaster\Cast\IntBoolCast;
-use CodeIgniter\DataCaster\Cast\IntegerCast;
-use CodeIgniter\DataCaster\Cast\JsonCast;
-use CodeIgniter\DataCaster\Cast\TimestampCast;
-use CodeIgniter\DataCaster\Cast\URICast;
-use CodeIgniter\DataCaster\Exceptions\CastException;
-use CodeIgniter\I18n\Time;
 use DateTimeInterface;
-use JsonException;
 
 class EntityCaster
 {
-    protected array     $casts    = [];
-    protected array     $nullable = [];
     protected Sanitizer $sanitizer;
-
-    protected array $castHandlers = [
-        'array'     => ArrayCast::class,
-        'bool'      => BooleanCast::class,
-        'boolean'   => BooleanCast::class,
-        'csv'       => CSVCast::class,
-        'datetime'  => DatetimeCast::class,
-        'double'    => FloatCast::class,
-        'float'     => FloatCast::class,
-        'int'       => IntegerCast::class,
-        'integer'   => IntegerCast::class,
-        'int-bool'  => IntBoolCast::class,
-        'json'      => JsonCast::class,
-        'timestamp' => TimestampCast::class,
-        'uri'       => URICast::class,
-    ];
+    protected array     $casts        = [];
+    protected array     $castParams   = [];
+    protected array     $castHandlers = [];
+    protected array     $dateFormats  = [];
+    protected array     $nullable     = [];
 
     public function __construct(array $casts, ?array $castHandlers, Sanitizer $sanitizer)
     {
+        if ($castHandlers) {
+            $this->castHandlers = $castHandlers;
+        }
+
         foreach ($casts as $field => $cast) {
             if (str_starts_with($cast, '?')) {
                 $cast = ltrim($cast, '?');
@@ -49,278 +27,276 @@ class EntityCaster
                 $this->nullable[$field] = true;
             }
 
-            $this->casts[$field] = $cast;
-        }
+            if (str_contains($cast, '[') and preg_match('/\A(.+)\[(.+)]\z/', $cast, $matches)) {
+                $cast = $matches[1];
 
-        if ($castHandlers) {
-            $this->castHandlers = $castHandlers + $this->castHandlers;
+                $params = array_map('trim', explode(',', $matches[2]));
+            } else {
+                $params = [];
+            }
+
+            if (isset($this->castHandlers[$cast])) {
+                $handler = $this->castHandlers[$cast];
+
+                if (!method_exists($handler, 'get')) {
+                    throw new EntityException("Cast method 'get' does not exist in $handler");
+                }
+
+                if (!method_exists($handler, 'set')) {
+                    throw new EntityException("Cast method 'set' does not exist in $handler");
+                }
+
+                if (isset($this->nullable[$field])) {
+                    $params[] = 'nullable';
+                }
+
+                $this->castParams[$field] = $params;
+            }
+
+            if (str_starts_with($cast, 'datetime') or $cast === 'timestamp') {
+                $this->dateFormats[$field] = match ($cast) {
+                    'datetime-ms' => 'Y-m-d H:i:s.v',
+                    'datetime-us' => 'Y-m-d H:i:s.u',
+                    'date' => 'Y-m-d',
+                    'time' => 'H:i:s',
+                    default => 'Y-m-d H:i:s',
+                };
+            }
+
+            $this->casts[$field] = $cast;
         }
 
         $this->sanitizer = $sanitizer;
     }
 
-    public function getDateFormat($type = 'datetime'): string
+    /**
+     * Prepare data for serialization
+     */
+    public function __serialize(): array
     {
-        $map = [
-            'time'        => 'H:i:s',
-            'date'        => 'Y-m-d',
-            'datetime'    => 'Y-m-d H:i:s',
-            'datetime-ms' => 'Y-m-d H:i:s.v',
-            'datetime-us' => 'Y-m-d H:i:s.u',
+        return [
+            'casts'        => $this->casts,
+            'nullable'     => $this->nullable,
+            'sanitizer'    => $this->sanitizer,
+            'castParams'   => $this->castParams,
+            'castHandlers' => $this->castHandlers,
+            'dateFormats'  => $this->dateFormats,
         ];
-
-        return $map[$type] ?? 'Y-m-d H:i:s';
     }
 
     /**
-     * Convert data to the database storage format
-     *
-     * @param array $data
-     *
-     * @return array
+     * Restore state after serialization.
      */
-    public function toDataSource(array $data): array
+    public function __unserialize(array $data): void
     {
-        foreach ($data as $field => $value) {
-
-            $cast = $this->casts[$field] ?? 'text';
-
-            switch ($cast) {
-                case 'int':
-                    if (!is_int($value)) {
-                        $data[$field] = (int) $value;
-                    }
-                    break;
-                case 'text':
-                    $data[$field] = $this->sanitizer->sanitizeText((string) $value);
-                    break;
-                case 'timestamp':
-                    if (!is_int($value)) {
-                        if (is_numeric($value)) {
-                            $data[$field] = (int) $value;
-                        } elseif (is_string($value)) {
-                            $data[$field] = strtotime($value);
-                        } elseif ($value instanceof DateTimeInterface) {
-                            $data[$field] = $value->getTimestamp();
-                        } else {
-                            throw new CastException("The provided value '{$value}' for the field '{$field}' is not a correct timestamp");
-                        }
-                    }
-                    break;
-                case 'html':
-                case 'html-full':
-                case 'html-basic':
-                    if ($cast === 'html') {
-                        $data[$field] = $this->sanitizer->sanitizeHtml((string) $value);
-                    } else {
-                        $data[$field] = $this->sanitizer->sanitizeHtml((string) $value, str_replace('html-', '', $cast));
-                    }
-                    break;
-                case 'key':
-                    $data[$field] = $this->sanitizer->sanitizeKey((string) $value);
-                    break;
-                case 'bool':
-                case 'int-bool':
-                    $data[$field] = $value ? 1 : 0;
-                    break;
-                case 'float':
-                    if (!is_float($value)) {
-                        $data[$field] = (float) $value;
-                    }
-                    break;
-                case 'json':
-                case 'json-array':
-                    if (is_array($value) or is_object($value)) {
-                        try {
-                            $data[$field] = json_encode($value, JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR);
-                        } catch (JsonException $exception) {
-                            throw CastException::forInvalidJsonFormat($exception->getCode());
-                        }
-                    }
-                    break;
-                case 'array':
-                    if (!is_string($value) or !str_starts_with($value, 's:')) {
-                        $data[$field] = serialize($value);
-                    }
-                    break;
-                case 'datetime':
-                case 'datetime-ms':
-                case 'datetime-us':
-                    if ($value instanceof DateTimeInterface) {
-                        $data[$field] = $value->format($this->getDateFormat($cast));
-                    } else {
-                        if (is_numeric($value)) {
-                            $timestamp = (int) $value;
-                        } else {
-                            $timestamp = strtotime($value);
-                        }
-                        if ($timestamp > 0) {
-                            $data[$field] = date($this->getDateFormat($cast), $timestamp);
-                        } else {
-                            throw new CastException("The provided value '{$value}' for the field '{$field}' is not a correct date");
-                        }
-                    }
-                    break;
-                case 'uri':
-                    if (!is_string($value)) {
-                        $data[$field] = (string) $value;
-                    }
-                    break;
-                case 'csv':
-                    if (is_object($value)) {
-                        $value = (array) $value;
-                    } elseif (!is_array($value)) {
-                        $value = [(string) $value];
-                    }
-                    $data[$field] = implode(',', $value);
-                    break;
-                default:
-                    $data[$field] = $this->castAs($value, $cast, 'set');
-            }
-        }
-
-        return $data;
+        $this->casts        = $data['casts'];
+        $this->nullable     = $data['nullable'];
+        $this->sanitizer    = $data['sanitizer'];
+        $this->castParams   = $data['castParams'];
+        $this->castHandlers = $data['castHandlers'];
+        $this->dateFormats  = $data['dateFormats'];
     }
 
     /**
-     * Converts data from DataSource to PHP array with specified type values.
-     *
-     * @param array<string, mixed> $row DataSource data
-     *
+     * Covnert a field value in database storage format
      */
-    public function fromDataSource(array $row): array
+    public function toStorage(string $field, $value)
     {
-        $casts = array_intersect_key($this->casts, $row);
-
-        foreach ($casts as $field => $cast) {
-
-            $value = $row[$field];
-
-            switch ($cast) {
-                case 'int':
-                    if (!is_int($value)) {
-                        $row[$field] = (int) $value;
-                    }
-                    break;
-                case 'key';
-                case 'text';
-                case 'html':
-                case 'html-full':
-                case 'html-basic':
-                    if (!is_string($value)) {
-                        $row[$field] = (string) $value;
-                    }
-                    break;
-                case 'datetime':
-                case 'datetime-ms':
-                case 'datetime-us':
-                case 'timestamp':
-                    if (is_string($value) or is_numeric($value)) {
-                        try {
-                            if (is_numeric($value) and $cast === 'timestamp') {
-                                $row[$field] = Time::createFromTimestamp(
-                                    (int) $value,
-                                    date_default_timezone_get()
-                                );
-                            } else {
-                                $row[$field] = Time::createFromFormat(
-                                    $this->getDateFormat($cast),
-                                    $value
-                                );
-                            }
-                        } catch (\Throwable $exception) {
-                            $row[$field] = null;
-                        }
-                    } elseif (!($value instanceof Time)) {
-                        $row[$field] = null;
-                    }
-                    break;
-                case 'bool':
-                case 'int-bool':
-                    if (!is_bool($value)) {
-                        $row[$field] = (bool) $value;
-                    }
-                    break;
-                case 'float':
-                    if (!is_float($value)) {
-                        $row[$field] = (float) $value;
-                    }
-                    break;
-                case 'json':
-                    if (is_string($value)) {
-                        $row[$field] = json_decode($value, false);
-                    } elseif (!is_object($value)) {
-                        $row[$field] = (object) $value;
-                    }
-                    break;
-                case 'json-array':
-                    if (is_string($value)) {
-                        $row[$field] = json_decode($value, true);
-                    } elseif (!is_array($value)) {
-                        $row[$field] = (array) $value;
-                    }
-                    break;
-                case 'array':
-                    if (is_string($value) and $this->isSerialized($value)) {
-                        $row[$field] = unserialize($value, ['allowed_classes' => false]);
-                    } elseif (!is_array($value)) {
-                        $row[$field] = (array) $value;
-                    }
-                    break;
-                case 'csv':
-                    if (!is_array($value)) {
-                        $row[$field] = explode(',', (string) $value);
-                    }
-                    break;
-                default:
-                    $row[$field] = $this->castAs($value, $field, 'get');
-            }
-
-        }
-
-        return $row;
-    }
-
-    public function castAs(mixed $value, string $field, string $method = 'get'): mixed
-    {
-        if ($method !== 'get' and $method !== 'set') {
-            throw CastException::forInvalidMethod($method);
-        }
-
-        if (!isset($this->casts[$field])) {
+        if (!isset($this->casts[$field]) or ($value === null and isset($this->nullable[$field]))) {
             return $value;
         }
 
         $cast = $this->casts[$field];
 
-        $cast = ($cast === 'json-array') ? 'json[array]' : $cast;
+        switch ($cast) {
+            case 'int':
+                return (int) $value;
+            case 'text':
+                return $this->sanitizer->sanitizeText((string) $value);
+            case 'text-raw':
+                return (string) $value;
+            case 'timestamp':
+                if (is_int($value) or is_numeric($value)) {
+                    return (int) $value;
+                }
 
-        $params = [];
+                if (is_string($value)) {
+                    $value = strtotime($value);
 
-        if (preg_match('/\A(.+)\[(.+)]\z/', $cast, $matches)) {
-            $cast   = $matches[1];
-            $params = array_map('trim', explode(',', $matches[2]));
+                    if ($value === false) {
+                        return isset($this->nullable[$field]) ? null : 0;
+                    }
+
+                    return $value;
+                }
+
+                if ($value instanceof DateTimeInterface) {
+                    return $value->getTimestamp();
+                }
+
+                return isset($this->nullable[$field]) ? null : 0;
+            case 'html':
+            case 'html-full':
+            case 'html-basic':
+                if ($cast === 'html') {
+                    return $this->sanitizer->sanitizeHtml((string) $value);
+                }
+
+                return $this->sanitizer->sanitizeHtml((string) $value, str_replace('html-', '', $cast));
+            case 'key':
+                return $this->sanitizer->sanitizeKey((string) $value);
+            case 'bool':
+            case 'int-bool':
+                return $value ? 1 : 0;
+            case 'float':
+                return (float) $value;
+            case 'json':
+            case 'json-array':
+                if (is_array($value) or is_object($value)) {
+                    $value = json_encode($value, JSON_UNESCAPED_UNICODE);
+
+                    if ($value === false) {
+                        return isset($this->nullable[$field]) ? null : '{}';
+                    }
+                }
+
+                return (string) $value;
+            case 'array':
+                if (!is_string($value) or !$this->isSerialized($value)) {
+                    return serialize($value);
+                }
+                return $value;
+            case 'datetime':
+            case 'datetime-ms':
+            case 'datetime-us':
+                if ($value instanceof DateTimeInterface) {
+                    return $value->format($this->dateFormats[$field]);
+                }
+
+                if (is_numeric($value)) {
+                    $timestamp = (int) $value;
+                } else {
+                    $timestamp = strtotime($value);
+                }
+
+                if ($timestamp > 0) {
+                    return date($this->dateFormats[$field], $timestamp);
+                }
+
+                return isset($this->nullable[$field]) ? null : '';
+            case 'uri':
+                return $this->sanitizer->sanitizeUri((string) $value);
+            case 'csv':
+                if (is_object($value)) {
+                    $value = (array) $value;
+                } elseif (!is_array($value)) {
+                    $value = [(string) $value];
+                }
+                return implode(',', $value);
+            default:
+                if (isset($this->castHandlers[$cast])) {
+                    $handler = $this->castHandlers[$cast];
+                    $value   = $handler::set($value, $this->castParams[$field]);
+                }
         }
 
-        if (!empty($this->nullable[$field])) {
-            $params[] = 'nullable';
+        return $value;
+    }
+
+    /**
+     * Covnert a field value from database storage format
+     */
+    public function fromStorage(string $field, $value)
+    {
+        if (!isset($this->casts[$field]) or ($value === null and isset($this->nullable[$field]))) {
+            return $value;
         }
 
-        $cast = trim($cast, '[]');
+        $cast = $this->casts[$field];
 
-        $handlers = $this->castHandlers;
+        switch ($cast) {
+            case 'int':
+            case 'timestamp':
+                return (int) $value;
+            case 'key';
+            case 'text';
+                return htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+            case 'html':
+            case 'html-full':
+            case 'html-basic':
+            case 'text-raw':
+                return (string) $value;
+            case 'datetime':
+            case 'datetime-ms':
+            case 'datetime-us':
+                if (is_int($value) or is_numeric($value)) {
+                    return (int) $value;
+                }
 
-        if (!isset($handlers[$cast])) {
-            throw new CastException("No such handler for '{$field}'. Invalid type: '{$cast}'");
+                if (is_string($value)) {
+                    $value = strtotime($value);
+
+                    if ($value === false) {
+                        return isset($this->nullable[$field]) ? null : 0;
+                    }
+
+                    return $value;
+                }
+
+                if ($value instanceof DateTimeInterface) {
+                    return $value->format($this->dateFormats[$field]);
+                }
+
+                return isset($this->nullable[$field]) ? null : 0;
+            case 'bool':
+            case 'int-bool':
+                return (bool) $value;
+            case 'float':
+                return (float) $value;
+            case 'array':
+                if (is_string($value) and $this->isSerialized($value)) {
+                    return unserialize($value, ['allowed_classes' => false]);
+                }
+
+                return (array) $value;
+            case 'json-array':
+                if (is_string($value)) {
+                    return json_decode($value, true);
+                }
+
+                return (array) $value;
+            case 'json':
+                if (is_string($value)) {
+                    return json_decode($value, false);
+                }
+
+                if (!is_object($value)) {
+                    return (object) $value;
+                }
+
+                return isset($this->nullable[$field]) ? null : new \stdClass();
+            case 'csv':
+                if (is_string($value)) {
+                    return explode(',', $value);
+                }
+
+                if (is_array($value)) {
+                    return $value;
+                }
+
+                if (is_object($value)) {
+                    return (array) $value;
+                }
+
+                return [];
+            default:
+                if (isset($this->castHandlers[$cast])) {
+                    $handler = $this->castHandlers[$cast];
+                    $value   = $handler::get($value, $this->castParams[$field]);
+                }
         }
 
-        $handler = $handlers[$cast];
-
-        if (!method_exists($handler, $method)) {
-            throw CastException::forInvalidInterface($handler);
-        }
-
-        return $handler::$method($value, $params);
+        return $value;
     }
 
     /**
@@ -352,7 +328,7 @@ class EntityCaster
             return false;
         }
 
-        return (bool) preg_match('/^[adObisCE]:/', $string);
+        return str_contains('adObisCE', $string[0]);
     }
 
 }

@@ -2,8 +2,6 @@
 
 namespace App\Core\Entity;
 
-use App\Core\Libraries\Escaper;
-
 /**
  * Interface EntityInterface
  *
@@ -14,17 +12,12 @@ interface EntityInterface
     /**
      * Get an entity caster
      */
-    public static function getCaster(): EntityCaster;
-
-    /**
-     * Get a normalized array with entity fields
-     */
-    public static function getFields(): array;
+    public static function buildSchema(): EntitySchema;
 
     /**
      * Initializes the entity and triggers one-time static data caching
      */
-    public function __construct(?array $data = null);
+    public function __construct(array $data = []);
 
     /**
      * Get raw entry attributes
@@ -44,12 +37,12 @@ interface EntityInterface
     /**
      * Internal method to set a single attribute with change tracking and casting.
      */
-    public function setAttribute(string $key, mixed $value): bool;
+    public function setAttribute(string $field, mixed $value): bool;
 
     /**
      * Check if an attribute or a whole entity has changed
      */
-    public function hasChanged(?string $key = null): bool;
+    public function hasChanged(?string $field = null): bool;
 
     /**
      * Get changed attributes with new values

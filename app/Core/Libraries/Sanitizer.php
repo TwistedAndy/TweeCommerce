@@ -50,15 +50,7 @@ class Sanitizer
 
     public function __construct()
     {
-        // Build spaced-out patterns for all dangerous keywords
-        $protocols = [];
-        $keywords  = ['javascript', 'vbscript', 'data', 'livescript', 'behavior', 'expression', 'import'];
-
-        foreach ($keywords as $keyword) {
-            $protocols[] = implode('([\s\0\x09\x0A\x0D]|&#[xX]?[0-9a-fA-F]+;?|\/\*.*?\*\/)*', str_split($keyword));
-        }
-
-        $this->protocolsCache = '(' . implode('|', $protocols) . ')';
+        $this->initProtocolCache();
     }
 
     /**
@@ -73,6 +65,26 @@ class Sanitizer
         $text = mb_strtolower($text, 'UTF-8');
 
         return preg_replace(['/\s+/u', '/[^a-z0-9_\-]/'], ['_', ''], trim($text));
+    }
+
+    /**
+     * Sanitize a URI string
+     */
+    public function sanitizeUri(string $uri): string
+    {
+        // Normalize unicode and decode entities
+        $uri = $this->normalizeString($uri);
+
+        // Strip all whitespace and control characters
+        $uri = preg_replace('/[\s\0\p{C}]+/u', '', $uri);
+
+        // Block blacklisted Protocols
+        if (preg_match('#^' . $this->protocolsCache . ':#iu', $uri)) {
+            return '';
+        }
+
+        // Remove unsafe characters
+        return str_replace(['"', "'", '<', '>', '`', '\\'], '', $uri);
     }
 
     /**
@@ -431,6 +443,35 @@ class Sanitizer
         } while ($count > 0);
 
         return $html;
+    }
+
+    /**
+     * Build spaced-out patterns for all dangerous keywords
+     */
+    protected function initProtocolCache(): void
+    {
+        if (!empty($this->protocolsCache)) {
+            return;
+        }
+
+        $protocols = [];
+        $keywords  = ['javascript', 'vbscript', 'data', 'livescript', 'behavior', 'expression', 'import'];
+
+        foreach ($keywords as $keyword) {
+            $protocols[] = implode('([\s\0\x09\x0A\x0D]|&#[xX]?[0-9a-fA-F]+;?|\/\*.*?\*\/)*', str_split($keyword));
+        }
+
+        $this->protocolsCache = '(' . implode('|', $protocols) . ')';
+    }
+
+    public function __serialize(): array
+    {
+        return [];
+    }
+
+    public function __unserialize(array $data): void
+    {
+        $this->initProtocolCache();
     }
 
 }

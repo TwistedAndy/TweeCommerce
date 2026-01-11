@@ -74,8 +74,10 @@ class EntityService
             $this->entityTable = $sanitizer->sanitizeKey($config['entity_table']);
         }
 
-        $fields = $this->entityClass::getFields();
-        $caster = $this->entityClass::getCaster();
+        $schema = $this->entityClass::buildSchema();
+
+        $fields = $schema->fields;
+        $caster = $schema->caster;
 
         $validationRules = [];
 
