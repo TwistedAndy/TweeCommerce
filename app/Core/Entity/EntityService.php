@@ -74,8 +74,9 @@ class EntityService
             $this->entityTable = $sanitizer->sanitizeKey($config['entity_table']);
         }
 
-        $fields = $this->entityClass::getFields();
-        $caster = $this->entityClass::getCaster();
+        $schema = $this->entityClass::buildSchema();
+
+        $fields = $schema->fields;
 
         $validationRules = [];
 
@@ -107,7 +108,6 @@ class EntityService
 
         $this->entityPrimaryKey = $primaryKey;
         $this->entitySanitizer  = $sanitizer;
-        $this->entityCaster     = $caster;
         $this->entityFields     = $fields;
         $this->validationRules  = $validationRules;
         $this->useSoftDeletes   = array_key_exists('deleted_at', $fields);

@@ -2,9 +2,7 @@
 
 namespace App\Core\Entity;
 
-use App\Core\Libraries\Escaper;
 use App\Core\Container\Container;
-use CodeIgniter\DataCaster\Cast\CastInterface;
 use CodeIgniter\Exceptions\BadMethodCallException;
 use JsonSerializable;
 
@@ -14,173 +12,54 @@ use JsonSerializable;
 class Entity implements EntityInterface, JsonSerializable
 {
     /**
-     * A set of internal static caches
+     * Method keys and names caches
      */
-    protected static array $entityDefaults = [];
-    protected static array $entityEscapers = [];
-    protected static array $entityCasters  = [];
-    protected static array $entityMethods  = [];
-    protected static array $entityFields   = [];
-    protected static array $entityCasts    = [];
+    protected static array $schemas = [];
+    protected static array $getters = [];
+    protected static array $setters = [];
+    protected static array $keys    = [];
 
     /**
-     * Get an entity caster
+     * Build a schema object and fill the caches
      */
-    public static function getCaster(): EntityCaster
+    public static function buildSchema(): EntitySchema
     {
         $class = static::class;
 
-        if (!isset(static::$entityCasters[$class])) {
-            static::getFields();
+        if (isset(static::$schemas[$class])) {
+            return static::$schemas[$class];
         }
-
-        return static::$entityCasters[$class];
-    }
-
-    /**
-     * Get a normalized array with entity fields
-     */
-    public static function getFields(): array
-    {
-        $class = static::class;
-
-        if (isset(static::$entityFields[$class])) {
-            return static::$entityFields[$class];
-        }
-
-        static::$entityFields[$class] = [];
-
-        $entityFields = static::getSchema();
 
         $container = Container::getInstance();
 
-        $fieldCasts      = [];
-        $castHandlers    = [];
-        $fieldDefaults   = [];
-        $resolveDefaults = [];
-        $entityMethods   = [];
-        $hasPrimaryKey   = false;
-
-        foreach ($entityFields as $key => $field) {
-
-            if (empty($field['type'])) {
-                $field['type'] = 'text';
-            } elseif (!is_string($field['type'])) {
-                throw new EntityException('A provided type should be a valid cast string');
-            }
-
-            $fieldCasts[$key] = $field['type'];
-
-            if (array_key_exists('default', $field)) {
-                $fieldDefaults[$key] = $field['default'];
-            } else {
-                $resolveDefaults[$key] = '';
-            }
-
-            if (empty($field['label'])) {
-                $field['label'] = ucwords(str_replace('_', ' ', $key));
-            }
-
-            if (!empty($field['caster'])) {
-                if (is_string($field['caster']) and is_subclass_of($field['caster'], CastInterface::class)) {
-                    $castHandlers[$field['type']] = $field['caster'];
-                } else {
-                    throw new EntityException('A provided caster should be a implement the CastInterface interface');
-                }
-            }
-
-            if (!empty($field['primary'])) {
-                if ($hasPrimaryKey) {
-                    throw new EntityException('There should be only one field marked as a primary key');
-                }
-
-                $hasPrimaryKey = true;
-            }
-
-            if (str_contains($key, '_')) {
-                $method = str_replace(['-', '_', ' '], '', ucwords($key, '-_ '));
-            } else {
-                $method = ucfirst($key);
-            }
-
-            $entityMethods[$key]            = $method;
-            $entityMethods['get' . $method] = $key;
-            $entityMethods['set' . $method] = $key;
-
-            if (array_key_exists('rules', $field)) {
-                if (is_string($field['rules'])) {
-                    $field['rules'] = [
-                        'rules' => $field['rules'],
-                    ];
-                } elseif (is_array($field['rules']) and empty($field['rules']['rules'])) {
-                    $field['rules'] = [
-                        'rules' => $field['rules'],
-                    ];
-                }
-
-                if (!is_array($field['rules']) or empty($field['rules']['rules'])) {
-                    throw new EntityException("Failed to initialize field rules for '{$key}'");
-                }
-
-                if (array_key_exists('errors', $field)) {
-                    $field['rules']['errors'] = $field['errors'];
-                    unset($field['errors']);
-                }
-            }
-
-            $entityFields[$key] = $field;
-        }
-
-        if (!$hasPrimaryKey) {
-            throw new EntityException('No primary key is specified for an entity');
-        }
-
-        $entityEscaper = $container->make(Escaper::class, [], static::class);
-
-        $entityCaster = $container->make(EntityCaster::class, [
-            'casts'        => $fieldCasts,
-            'castHandlers' => $castHandlers,
+        static::$getters[$class] = [];
+        static::$setters[$class] = [];
+        static::$schemas[$class] = $container->make(EntitySchema::class, [
+            'fields' => $class::getFields(),
         ], static::class);
 
-        if ($resolveDefaults) {
+        $reflection = new \ReflectionClass($class);
+        $methods    = $reflection->getMethods(\ReflectionMethod::IS_PUBLIC);
 
-            $defaults = $entityCaster->fromDataSource($resolveDefaults);
-
-            foreach ($defaults as $key => $default) {
-                $entityFields[$key]['default'] = $default;
-                $fieldDefaults[$key]           = $default;
+        foreach ($methods as $method) {
+            $name = $method->getName();
+            if (str_starts_with($name, 'get')) {
+                $key                           = strtolower(preg_replace('/(?<!^)([A-Z])/', '_$1', $name));
+                static::$getters[$class][$key] = $name;
+            } elseif (str_starts_with($name, 'set')) {
+                $key                           = strtolower(preg_replace('/(?<!^)([A-Z])/', '_$1', $name));
+                static::$setters[$class][$key] = $name;
             }
-
         }
 
-        self::$entityDefaults[$class] = $fieldDefaults;
-        self::$entityEscapers[$class] = $entityEscaper;
-        self::$entityMethods[$class]  = $entityMethods;
-        self::$entityCasters[$class]  = $entityCaster;
-        self::$entityFields[$class]   = $entityFields;
-        self::$entityCasts[$class]    = $fieldCasts;
-
-        return self::$entityFields[$class];
+        return static::$schemas[$class];
     }
 
     /**
-     * Return an entry fields with a field name as a key
-     *
-     * @see https://codeigniter.com/user_guide/models/model.html#custom-casting,
-     *      https://codeigniter.com/user_guide/libraries/validation.html#setting-validation-rules
+     * Get entity schema fields
      */
-    protected static function getSchema(): array
+    protected static function getFields(): array
     {
-        /**
-         * @var array<string, array{
-         *   primary?: (bool),         // Primary key flag
-         *   label?:   (string),       // Field label
-         *   default?: (mixed),        // Default value
-         *   type?:    (string),       // Casting type
-         *   rules?:   (string|array), // Validation rules
-         *   caster?:  (string)        // Caster class name
-         * }>
-         */
         return [
             'id'         => [
                 'primary' => true,
@@ -216,115 +95,156 @@ class Entity implements EntityInterface, JsonSerializable
     }
 
     /**
-     * Current entity attributes
+     * Current entity attributes in the storage format
      */
     protected array $attributes = [];
 
     /**
-     * Original values of changed entity attributes
+     * Changed attribute values
      */
-    protected array $original = [];
+    protected array $changes = [];
 
     /**
-     * Cached escaped values to prevent redundant escaping operations.
+     * Escaped attribute values in the entity format
      */
     protected array $escaped = [];
 
-    public function __construct(?array $data = null)
+    protected bool $customSchema = false;
+
+    protected EntitySchema $schema;
+
+    public function __construct(array $data = [], ?EntitySchema $schema = null)
     {
         $class = static::class;
 
-        if (!isset(static::$entityDefaults[$class])) {
-            static::getFields();
+        if (!isset(static::$schemas[$class])) {
+            static::buildSchema();
         }
 
-        $this->attributes = is_array($data) ? ($data + static::$entityDefaults[$class]) : static::$entityDefaults[$class];
+        if ($schema === null) {
+            $this->schema = static::$schemas[$class];
+        } else {
+            $this->schema = $schema;
+
+            $this->customSchema = true;
+        }
+
+        $this->attributes = $data;
     }
 
-    public function __isset(string $key): bool
+    public function __isset(string $field): bool
     {
-        return isset($this->attributes[$key]) or isset(static::$entityMethods[static::class][$key]);
+        return array_key_exists($field, $this->attributes) or array_key_exists($field, $this->schema->defaults) or isset(static::$getters[static::class][$field]);
     }
 
-    public function __get(string $key): mixed
+    public function __get(string $field): mixed
     {
-        if (!isset(static::$entityMethods[static::class][$key])) {
-            return null;
+        if (array_key_exists($field, $this->escaped)) {
+            return $this->escaped[$field];
         }
 
-        $suffix = static::$entityMethods[static::class][$key];
-        $method = 'get' . $suffix;
+        $class = static::class;
 
-        if (method_exists($this, $method)) {
-            return $this->$method();
+        if (isset(static::$getters[$class][$field])) {
+            $method = static::$getters[$class][$field];
+            $value  = $this->$method();
+        } else {
+            $value = $this->schema->caster->fromStorage($this->schema, $field, $this->getAttribute($field));
         }
 
-        $value = $this->attributes[$key] ?? null;
-
-        if (is_string($value) and $value) {
-            $casts = self::$entityCasts[static::class];
-            if (!isset($casts[$key]) or $casts[$key] === 'text') {
-                if (!isset($this->escaped[$key])) {
-                    $this->escaped[$key] = static::$entityEscapers[static::class]->escapeHtml($value);
-                }
-                $value = $this->escaped[$key];
-            }
-        }
+        $this->escaped[$field] = $value;
 
         return $value;
     }
 
-    public function __set(string $key, $value): void
+    public function __set(string $field, $value): void
     {
-        if (!isset(static::$entityMethods[static::class][$key])) {
-            return;
-        }
+        $class = static::class;
 
-        $method = 'set' . static::$entityMethods[static::class][$key];
-
-        if (method_exists($this, $method)) {
+        if (isset(static::$setters[$class][$field])) {
+            $method = static::$setters[$class][$field];
             $this->$method($value);
-            return;
+        } else {
+            $this->setAttribute($field, $value);
         }
-
-        $this->setAttribute($key, $value);
     }
 
     public function __call(string $method, array $arguments): mixed
     {
-        if (!isset(static::$entityMethods[static::class][$method])) {
-            throw new BadMethodCallException(sprintf('Method %s does not exist.', $method));
+        if (isset(static::$keys[$method])) {
+            $key = static::$keys[$method];
+        } else {
+            $key = strtolower(preg_replace(['/^(?:get|set|has)/', '/(?<!^)([A-Z])/'], ['', '_$1'], $method));
+
+            static::$keys[$method] = $key;
         }
 
-        $attribute = static::$entityMethods[static::class][$method];
-
         if (str_starts_with($method, 'get')) {
-            return $this->__get($attribute);
+            return $this->__get($key);
         }
 
         if (str_starts_with($method, 'set')) {
-            return $this->setAttribute($attribute, $arguments[0] ?? null);
+            $this->__set($key, $arguments[0]);
+            return array_key_exists($key, $this->changes);
+        }
+
+        if (str_starts_with($method, 'has')) {
+            return $this->__isset($key);
         }
 
         throw new BadMethodCallException(sprintf('Method %s does not exist.', $method));
     }
 
-    public function __unserialize(array $attributes): void
-    {
-        $this->setAttributes($attributes);
-    }
-
     public function __serialize(): array
     {
-        return $this->attributes;
+        $data = [
+            'attributes' => $this->attributes,
+            'changes'    => $this->changes
+        ];
+
+        if ($this->customSchema) {
+            $data['schema'] = $this->schema;
+        }
+
+        return $data;
+    }
+
+    public function __unserialize(array $data): void
+    {
+        $this->attributes = $data['attributes'];
+        $this->changes    = $data['changes'];
+
+        if (isset($data['schema'])) {
+            $this->customSchema = true;
+            $this->schema       = $data['schema'];
+        } else {
+            $this->customSchema = false;
+            $this->schema       = static::buildSchema();
+        }
     }
 
     /**
-     * Get raw entry attributes
+     * Get entry attributes in the storage format
      */
     public function getAttributes(): array
     {
-        return $this->attributes;
+        return $this->changes ? ($this->changes + $this->attributes) : $this->attributes;
+    }
+
+    /**
+     * Get an entry attribute in the storage format
+     */
+    public function getAttribute(string $field): mixed
+    {
+        if (array_key_exists($field, $this->changes)) {
+            return $this->changes[$field];
+        }
+
+        if (array_key_exists($field, $this->attributes)) {
+            return $this->attributes[$field];
+        }
+
+        return $this->schema->defaults[$field] ?? null;
     }
 
     /**
@@ -332,60 +252,44 @@ class Entity implements EntityInterface, JsonSerializable
      */
     public function setAttributes(array $attributes): void
     {
-        $attributes       = self::$entityCasters[static::class]->fromDataSource($attributes);
-        $this->attributes = $attributes + $this->attributes;
+        foreach ($attributes as $field => $value) {
+            $this->setAttribute($field, $value);
+        }
     }
 
     /**
-     * Get a raw entry attribute
+     * Set an entry attribute
      */
-    public function getAttribute(string $key): mixed
+    public function setAttribute(string $field, mixed $value): bool
     {
-        return $this->attributes[$key] ?? null;
-    }
+        $oldValue = $this->getAttribute($field);
+        $newValue = $this->schema->caster->toStorage($this->schema, $field, $value);
 
-    /**
-     * Set a single entry attribute
-     */
-    public function setAttribute(string $key, mixed $value): bool
-    {
-        $currentValue = $this->attributes[$key] ?? null;
-
-        if (isset(self::$entityCasts[static::class][$key])) {
-            $data  = self::$entityCasters[static::class]->fromDataSource([$key => $value]);
-            $value = $data[$key];
+        if ($oldValue === $newValue) {
+            return false;
         }
 
-        if ($currentValue !== $value) {
-            if (!array_key_exists($key, $this->original)) {
-                $this->original[$key] = $currentValue;
-            }
+        unset($this->escaped[$field]);
 
-            $this->attributes[$key] = $value;
-
-            if (isset($this->escaped[$key])) {
-                unset($this->escaped[$key]);
-            }
-
-            if ($this->attributes[$key] === ($this->original[$key] ?? null)) {
-                unset($this->original[$key]);
-            }
-            return true;
+        if (array_key_exists($field, $this->attributes) and $this->attributes[$field] === $newValue) {
+            unset($this->changes[$field]);
+        } else {
+            $this->changes[$field] = $newValue;
         }
 
-        return false;
+        return true;
     }
 
     /**
      * Check if an attribute or a whole entity has changed
      */
-    public function hasChanged(?string $key = null): bool
+    public function hasChanged(?string $field = null): bool
     {
-        if ($key === null) {
-            return count($this->original) > 0;
+        if ($field === null) {
+            return count($this->changes) > 0;
         }
 
-        return array_key_exists($key, $this->original);
+        return array_key_exists($field, $this->changes);
     }
 
     /**
@@ -393,7 +297,7 @@ class Entity implements EntityInterface, JsonSerializable
      */
     public function getChanges(): array
     {
-        return array_intersect_key($this->attributes, $this->original);
+        return $this->changes;
     }
 
     /**
@@ -401,7 +305,7 @@ class Entity implements EntityInterface, JsonSerializable
      */
     public function flushChanges(): void
     {
-        $this->original = [];
+        $this->changes = [];
     }
 
     /**
@@ -409,16 +313,15 @@ class Entity implements EntityInterface, JsonSerializable
      */
     public function getOriginal(): array
     {
-        return $this->original + $this->attributes;
+        return $this->attributes;
     }
 
     /**
-     * Restore original attributes
+     * Get Entity Schema Object
      */
-    public function restoreOriginal(): void
+    public function getSchema(): EntitySchema
     {
-        $this->attributes = $this->original + $this->attributes;
-        $this->original   = [];
+        return $this->schema;
     }
 
     /**
@@ -429,7 +332,7 @@ class Entity implements EntityInterface, JsonSerializable
         if ($onlyChanged) {
             $attributes = $this->getChanges();
         } else {
-            $attributes = $this->attributes;
+            $attributes = $this->getAttributes();
         }
 
         if ($recursive) {
@@ -451,7 +354,7 @@ class Entity implements EntityInterface, JsonSerializable
      */
     public function jsonSerialize(): array
     {
-        return $this->attributes;
+        return $this->getAttributes();
     }
 
 }

@@ -48,19 +48,6 @@ class Sanitizer
      */
     protected string $protocolsCache = '';
 
-    public function __construct()
-    {
-        // Build spaced-out patterns for all dangerous keywords
-        $protocols = [];
-        $keywords  = ['javascript', 'vbscript', 'data', 'livescript', 'behavior', 'expression', 'import'];
-
-        foreach ($keywords as $keyword) {
-            $protocols[] = implode('([\s\0\x09\x0A\x0D]|&#[xX]?[0-9a-fA-F]+;?|\/\*.*?\*\/)*', str_split($keyword));
-        }
-
-        $this->protocolsCache = '(' . implode('|', $protocols) . ')';
-    }
-
     /**
      * Sanitize a key or a slug
      */
@@ -73,6 +60,18 @@ class Sanitizer
         $text = mb_strtolower($text, 'UTF-8');
 
         return preg_replace(['/\s+/u', '/[^a-z0-9_\-]/'], ['_', ''], trim($text));
+    }
+
+    /**
+     * Sanitize a URI string
+     */
+    public function sanitizeUri(string $uri): string
+    {
+        // Normalize unicode and decode entities
+        $uri = $this->normalizeString($uri);
+
+        // Remove unsafe characters
+        return filter_var($uri, FILTER_SANITIZE_URL);
     }
 
     /**
@@ -410,6 +409,10 @@ class Sanitizer
         $count   = 0;
         $pattern = '/(<[a-z0-9]+\b[^>]*?)\s+([a-z0-9_-]+)\s*=\s*(?!["\'])([^\s>]+)/iu';
 
+        if ($this->protocolsCache === '') {
+            $this->initProtocolCache();
+        }
+
         do {
             $html = preg_replace($pattern, '$1 $2="$3"', $html, -1, $count);
         } while ($count > 0);
@@ -431,6 +434,25 @@ class Sanitizer
         } while ($count > 0);
 
         return $html;
+    }
+
+    /**
+     * Build spaced-out patterns for all dangerous keywords
+     */
+    protected function initProtocolCache(): void
+    {
+        if ($this->protocolsCache !== '') {
+            return;
+        }
+
+        $protocols = [];
+        $keywords  = ['javascript', 'vbscript', 'data', 'livescript', 'behavior', 'expression', 'import'];
+
+        foreach ($keywords as $keyword) {
+            $protocols[] = implode('([\s\0\x09\x0A\x0D]|&#[xX]?[0-9a-fA-F]+;?|\/\*.*?\*\/)*', str_split($keyword));
+        }
+
+        $this->protocolsCache = '(' . implode('|', $protocols) . ')';
     }
 
 }

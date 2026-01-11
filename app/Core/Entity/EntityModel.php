@@ -180,7 +180,7 @@ class EntityModel extends Model
          */
         if (!empty($data['id'])) {
 
-            $row = $this->dataCaster->fromDataSource($data['data']);
+            $row = $data['data'];
 
             /**
              * Process the regular inserts
@@ -218,10 +218,7 @@ class EntityModel extends Model
             $key = $this->table . '_' . $id;
 
             if (isset(static::$entityCache[$key])) {
-                static::$entityCache[$key] = array_merge(
-                    static::$entityCache[$key],
-                    $this->dataCaster->fromDataSource($row)
-                );
+                static::$entityCache[$key] = array_merge(static::$entityCache[$key], $row);
             }
         }
 
@@ -256,16 +253,20 @@ class EntityModel extends Model
      */
     protected function convertToReturnType(array $row, string $returnType): array|object
     {
+        foreach ($row as $field => $value) {
+            $row[$field] = $this->dataCaster->fromStorage($field, $value);
+        }
+
         if ($returnType === $this->returnType) {
-            return new $returnType($this->dataCaster->fromDataSource($row));
+            return new $returnType($row);
         }
 
         if ($returnType === 'array') {
-            return $this->dataCaster->fromDataSource($row);
+            return $row;
         }
 
         if ($returnType === 'object') {
-            return (object) $this->dataCaster->fromDataSource($row);
+            return (object) $row;
         }
 
         return parent::convertToReturnType($row, $returnType);
@@ -306,7 +307,9 @@ class EntityModel extends Model
             $row = $this->objectToArray($row, $onlyChanged);
         }
 
-        $row = $this->dataCaster->toDataSource((array) $row);
+        foreach ($row as $field => $value) {
+            $row[$field] = $this->dataCaster->toStorage($value, $type);
+        }
 
         if (!$this->allowEmptyInserts and empty($row)) {
             throw DataException::forEmptyDataset($type);
