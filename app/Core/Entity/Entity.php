@@ -5,11 +5,14 @@ namespace App\Core\Entity;
 use App\Core\Container\Container;
 use CodeIgniter\Exceptions\BadMethodCallException;
 use JsonSerializable;
+use IteratorAggregate;
+use ArrayAccess;
+use Traversable;
 
 /**
  * A lightweight Entity class to handle simple objects
  */
-class Entity implements EntityInterface, JsonSerializable
+class Entity implements EntityInterface, JsonSerializable, ArrayAccess, IteratorAggregate
 {
     /**
      * Method keys and names caches
@@ -22,7 +25,7 @@ class Entity implements EntityInterface, JsonSerializable
     /**
      * Build a schema object and fill the caches
      */
-    public static function buildSchema(): EntitySchema
+    public static function resolveSchema(?Container $container = null): EntitySchema
     {
         $class = static::class;
 
@@ -30,24 +33,42 @@ class Entity implements EntityInterface, JsonSerializable
             return static::$schemas[$class];
         }
 
-        $container = Container::getInstance();
+        if ($container === null) {
+            $container = Container::getInstance();
+        }
 
         static::$getters[$class] = [];
         static::$setters[$class] = [];
         static::$schemas[$class] = $container->make(EntitySchema::class, [
-            'fields' => $class::getFields(),
+            'fields' => $class::getSchemaFields(),
         ], static::class);
 
         $reflection = new \ReflectionClass($class);
         $methods    = $reflection->getMethods(\ReflectionMethod::IS_PUBLIC);
 
+        $excluded = array_fill_keys([
+            'getAttributes',
+            'getAttribute',
+            'setAttributes',
+            'setAttribute',
+            'getChanges',
+            'getOriginal',
+            'getSchema',
+            'getIterator',
+        ], true);
+
         foreach ($methods as $method) {
             $name = $method->getName();
+
+            if (isset($excluded[$name])) {
+                continue;
+            }
+
             if (str_starts_with($name, 'get')) {
-                $key                           = strtolower(preg_replace('/(?<!^)([A-Z])/', '_$1', $name));
+                $key                           = strtolower(preg_replace('/(?<!^)([A-Z])/', '_$1', substr($name, 3)));
                 static::$getters[$class][$key] = $name;
             } elseif (str_starts_with($name, 'set')) {
-                $key                           = strtolower(preg_replace('/(?<!^)([A-Z])/', '_$1', $name));
+                $key                           = strtolower(preg_replace('/(?<!^)([A-Z])/', '_$1', substr($name, 3)));
                 static::$setters[$class][$key] = $name;
             }
         }
@@ -58,7 +79,7 @@ class Entity implements EntityInterface, JsonSerializable
     /**
      * Get entity schema fields
      */
-    protected static function getFields(): array
+    protected static function getSchemaFields(): array
     {
         return [
             'id'         => [
@@ -118,7 +139,7 @@ class Entity implements EntityInterface, JsonSerializable
         $class = static::class;
 
         if (!isset(static::$schemas[$class])) {
-            static::buildSchema();
+            static::resolveSchema();
         }
 
         if ($schema === null) {
@@ -132,64 +153,69 @@ class Entity implements EntityInterface, JsonSerializable
         $this->attributes = $data;
     }
 
-    public function __isset(string $field): bool
+    public function __isset(string $name): bool
     {
-        return array_key_exists($field, $this->attributes) or array_key_exists($field, $this->schema->defaults) or isset(static::$getters[static::class][$field]);
+        return array_key_exists($name, $this->attributes) or array_key_exists($name, $this->schema->fields) or isset(static::$getters[static::class][$name]);
     }
 
-    public function __get(string $field): mixed
+    public function __unset(string $name): void
     {
-        if (array_key_exists($field, $this->escaped)) {
-            return $this->escaped[$field];
+        unset($this->attributes[$name], $this->changes[$name], $this->escaped[$name]);
+    }
+
+    public function __get(string $name): mixed
+    {
+        if (array_key_exists($name, $this->escaped)) {
+            return $this->escaped[$name];
         }
 
         $class = static::class;
 
-        if (isset(static::$getters[$class][$field])) {
-            $method = static::$getters[$class][$field];
+        if (isset(static::$getters[$class][$name])) {
+            $method = static::$getters[$class][$name];
             $value  = $this->$method();
         } else {
-            $value = $this->schema->caster->fromStorage($this->schema, $field, $this->getAttribute($field));
+            $value = $this->schema->caster->fromStorage($this->schema, $name, $this->getAttribute($name));
         }
 
-        $this->escaped[$field] = $value;
+        $this->escaped[$name] = $value;
 
         return $value;
     }
 
-    public function __set(string $field, $value): void
+    public function __set(string $name, mixed $value): void
     {
         $class = static::class;
 
-        if (isset(static::$setters[$class][$field])) {
-            $method = static::$setters[$class][$field];
+        if (isset(static::$setters[$class][$name])) {
+            $method = static::$setters[$class][$name];
             $this->$method($value);
         } else {
-            $this->setAttribute($field, $value);
+            $this->setAttribute($name, $value);
         }
     }
 
     public function __call(string $method, array $arguments): mixed
     {
         if (isset(static::$keys[$method])) {
-            $key = static::$keys[$method];
+            $field = static::$keys[$method];
         } else {
-            $key = strtolower(preg_replace(['/^(?:get|set|has)/', '/(?<!^)([A-Z])/'], ['', '_$1'], $method));
+            $field = strtolower(preg_replace(['/^(?:get|set|has)/', '/(?<!^)([A-Z])/'], ['', '_$1'], $method));
 
-            static::$keys[$method] = $key;
+            static::$keys[$method] = $field;
         }
 
         if (str_starts_with($method, 'get')) {
-            return $this->__get($key);
+            return $this->__get($field);
         }
 
         if (str_starts_with($method, 'set')) {
-            $this->__set($key, $arguments[0]);
-            return array_key_exists($key, $this->changes);
+            $this->__set($field, $arguments[0]);
+            return array_key_exists($field, $this->changes);
         }
 
         if (str_starts_with($method, 'has')) {
-            return $this->__isset($key);
+            return $this->__isset($field);
         }
 
         throw new BadMethodCallException(sprintf('Method %s does not exist.', $method));
@@ -219,7 +245,7 @@ class Entity implements EntityInterface, JsonSerializable
             $this->schema       = $data['schema'];
         } else {
             $this->customSchema = false;
-            $this->schema       = static::buildSchema();
+            $this->schema       = static::resolveSchema();
         }
     }
 
@@ -354,7 +380,41 @@ class Entity implements EntityInterface, JsonSerializable
      */
     public function jsonSerialize(): array
     {
-        return $this->getAttributes();
+        return iterator_to_array($this);
     }
 
+    /**
+     * IteratorAggregate: Allow iterating over the entity properties
+     */
+    public function getIterator(): Traversable
+    {
+        $keys = array_keys($this->getAttributes() + $this->schema->defaults);
+
+        foreach ($keys as $key) {
+            yield $key => $this->__get($key);
+        }
+    }
+
+    /**
+     * ArrayAccess: Allow accessing entity propertines like an array
+     */
+    public function offsetExists(mixed $offset): bool
+    {
+        return $this->__isset($offset);
+    }
+
+    public function offsetGet(mixed $offset): mixed
+    {
+        return $this->__get($offset);
+    }
+
+    public function offsetSet(mixed $offset, mixed $value): void
+    {
+        $this->__set($offset, $value);
+    }
+
+    public function offsetUnset(mixed $offset): void
+    {
+        $this->__unset($offset);
+    }
 }

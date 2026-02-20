@@ -3,15 +3,11 @@
 namespace App\Core\Entity;
 
 use App\Core\Container\Container;
-use App\Core\Libraries\Sanitizer;
 
 class EntityService
 {
-    protected static array $types = [];
-
     protected string $alias;
 
-    protected string $entityPrimaryKey;
     protected string $entityTable;
     protected string $entityLabel;
     protected string $entityClass;
@@ -20,26 +16,14 @@ class EntityService
     protected string $dateFormat;
     protected bool   $useTimestamps;
     protected bool   $useSoftDeletes;
+    protected bool   $primaryKeyType;
+    protected string $primaryKeyField;
 
     public readonly EntityModel  $entityModel;
     public readonly EntityCaster $entityCaster;
-    public readonly Sanitizer    $entitySanitizer;
 
-    /**
-     * Handle the static instances
-     */
-    public static function getInstance(string $alias, array $config = []): self
+    public function __construct(array $config, Container $container)
     {
-        return static::$types[$alias] ?? Container::getInstance()->make(static::class, [
-            'alias'  => $alias,
-            'config' => $config,
-        ], static::class);
-    }
-
-    public function __construct(string $alias, array $config, Container $container, Sanitizer $sanitizer)
-    {
-        $this->alias = $sanitizer->sanitizeKey($alias);
-
         if (empty($this->alias)) {
             throw new EntityException('The entity service alias cannot be empty.');
         }
@@ -65,26 +49,34 @@ class EntityService
         if (empty($config['entity_label']) or !is_string($config['entity_label'])) {
             $this->entityLabel = ucfirst($this->alias);
         } else {
-            $this->entityLabel = $sanitizer->sanitizeText($config['entity_label']);
+            $this->entityLabel = $config['entity_label'];
         }
 
         if (empty($config['entity_table']) or !is_string($config['entity_table'])) {
             $this->entityTable = $this->alias . 's';
         } else {
-            $this->entityTable = $sanitizer->sanitizeKey($config['entity_table']);
+            $this->entityTable = $config['entity_table'];
         }
 
-        $schema = $this->entityClass::buildSchema();
+        if (empty($config['entityGroup'])) {
+            $DBGroup = null;
+        } else {
+            $DBGroup = $config['entityGroup'];
+        }
+
+        $schema = $this->entityClass::resolveSchema($container);
 
         $fields = $schema->fields;
 
         $validationRules = [];
 
-        $primaryKey = '';
+        $primaryKey  = '';
+        $primaryType = '';
 
         foreach ($fields as $key => $field) {
             if (!empty($field['primary'])) {
-                $primaryKey = $key;
+                $primaryKey  = $key;
+                $primaryType = $field['type'];
             }
 
             if (!array_key_exists('rules', $field)) {
@@ -106,21 +98,23 @@ class EntityService
             }
         }
 
-        $this->entityPrimaryKey = $primaryKey;
-        $this->entitySanitizer  = $sanitizer;
-        $this->entityFields     = $fields;
-        $this->validationRules  = $validationRules;
-        $this->useSoftDeletes   = array_key_exists('deleted_at', $fields);
-        $this->useTimestamps    = (!empty($fields['created_at']) or !empty($fields['updated_at']));
+        $this->primaryKeyType  = $primaryType;
+        $this->primaryKeyField = $primaryKey;
+
+        $this->entityFields    = $fields;
+        $this->validationRules = $validationRules;
+        $this->useSoftDeletes  = array_key_exists('deleted_at', $fields);
+        $this->useTimestamps   = (!empty($fields['created_at']) or !empty($fields['updated_at']));
 
         $config = [
+            'DBGroup'         => $DBGroup,
             'table'           => $this->entityTable,
-            'primaryKey'      => $this->entityPrimaryKey,
+            'primaryKey'      => $this->primaryKeyField,
             'returnType'      => $this->entityClass,
             'useSoftDeletes'  => $this->useSoftDeletes,
             'dataCaster'      => $this->entityCaster,
             'validationRules' => $this->validationRules,
-            'allowedFields'   => array_diff(array_keys($fields), [$this->entityPrimaryKey]),
+            'allowedFields'   => array_diff(array_keys($fields), [$this->primaryKeyField]),
         ];
 
         $dateFields = [
@@ -151,8 +145,6 @@ class EntityService
         $this->entityModel = $container->make($modelClass, [], static::class);
 
         $this->entityModel->configure($config);
-
-        static::$types[$this->alias] = $this;
     }
 
 }

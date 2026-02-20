@@ -140,8 +140,8 @@ class EntityCaster
             case 'int':
             case 'timestamp':
                 return (int) $value;
-            case 'key';
-            case 'text';
+            case 'key':
+            case 'text':
                 return htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
             case 'html':
             case 'html-full':

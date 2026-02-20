@@ -410,7 +410,7 @@ class Sanitizer
         $pattern = '/(<[a-z0-9]+\b[^>]*?)\s+([a-z0-9_-]+)\s*=\s*(?!["\'])([^\s>]+)/iu';
 
         if ($this->protocolsCache === '') {
-            $this->initProtocolCache();
+            $this->protocolsCache = $this->getProtocolCache();
         }
 
         do {
@@ -439,12 +439,8 @@ class Sanitizer
     /**
      * Build spaced-out patterns for all dangerous keywords
      */
-    protected function initProtocolCache(): void
+    protected function getProtocolCache(): string
     {
-        if ($this->protocolsCache !== '') {
-            return;
-        }
-
         $protocols = [];
         $keywords  = ['javascript', 'vbscript', 'data', 'livescript', 'behavior', 'expression', 'import'];
 
@@ -452,7 +448,7 @@ class Sanitizer
             $protocols[] = implode('([\s\0\x09\x0A\x0D]|&#[xX]?[0-9a-fA-F]+;?|\/\*.*?\*\/)*', str_split($keyword));
         }
 
-        $this->protocolsCache = '(' . implode('|', $protocols) . ')';
+        return '(' . implode('|', $protocols) . ')';
     }
 
 }

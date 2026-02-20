@@ -2,6 +2,8 @@
 
 namespace App\Core\Entity;
 
+use App\Core\Container\Container;
+
 /**
  * Interface EntityInterface
  *
@@ -12,7 +14,7 @@ interface EntityInterface
     /**
      * Get an entity caster
      */
-    public static function buildSchema(): EntitySchema;
+    public static function resolveSchema(?Container $container = null): EntitySchema;
 
     /**
      * Initializes the entity and triggers one-time static data caching
