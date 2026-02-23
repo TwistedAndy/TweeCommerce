@@ -12,8 +12,6 @@ class EntityModel extends Model
 {
     protected static array $entityCache = [];
 
-    protected EntityCaster $dataCaster;
-
     protected $primaryKey = 'id';
     protected $dateFormat = 'int';
     protected $returnType = Entity::class;

@@ -15,32 +15,32 @@ use Traversable;
 class Entity implements EntityInterface, JsonSerializable, ArrayAccess, IteratorAggregate
 {
     /**
-     * Method keys and names caches
+     * Entity Field Caches
      */
-    protected static array $schemas = [];
-    protected static array $getters = [];
-    protected static array $setters = [];
-    protected static array $keys    = [];
+    protected static array $entityFields  = [];
+    protected static array $entityGetters = [];
+    protected static array $entitySetters = [];
+    protected static array $entityMethods = [];
 
     /**
-     * Build a schema object and fill the caches
+     * Initialize entity fields and fill entity caches
      */
-    public static function resolveSchema(?Container $container = null): EntitySchema
+    public static function initEntityFields(?Container $container = null): EntityFields
     {
         $class = static::class;
 
-        if (isset(static::$schemas[$class])) {
-            return static::$schemas[$class];
+        if (isset(static::$entityFields[$class])) {
+            return static::$entityFields[$class];
         }
 
         if ($container === null) {
             $container = Container::getInstance();
         }
 
-        static::$getters[$class] = [];
-        static::$setters[$class] = [];
-        static::$schemas[$class] = $container->make(EntitySchema::class, [
-            'fields' => $class::getSchemaFields(),
+        static::$entityGetters[$class] = [];
+        static::$entitySetters[$class] = [];
+        static::$entityFields[$class]  = $container->make(EntityFields::class, [
+            'fields' => $class::getEntityFields(),
         ], static::class);
 
         $reflection = new \ReflectionClass($class);
@@ -53,7 +53,7 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             'setAttribute',
             'getChanges',
             'getOriginal',
-            'getSchema',
+            'getFields',
             'getIterator',
         ], true);
 
@@ -65,21 +65,21 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             }
 
             if (str_starts_with($name, 'get')) {
-                $key                           = strtolower(preg_replace('/(?<!^)([A-Z])/', '_$1', substr($name, 3)));
-                static::$getters[$class][$key] = $name;
+                $key                                 = strtolower(preg_replace('/(?<!^)([A-Z])/', '_$1', substr($name, 3)));
+                static::$entityGetters[$class][$key] = $name;
             } elseif (str_starts_with($name, 'set')) {
-                $key                           = strtolower(preg_replace('/(?<!^)([A-Z])/', '_$1', substr($name, 3)));
-                static::$setters[$class][$key] = $name;
+                $key                                 = strtolower(preg_replace('/(?<!^)([A-Z])/', '_$1', substr($name, 3)));
+                static::$entitySetters[$class][$key] = $name;
             }
         }
 
-        return static::$schemas[$class];
+        return static::$entityFields[$class];
     }
 
     /**
-     * Get entity schema fields
+     * Get entity fields in a raw format
      */
-    protected static function getSchemaFields(): array
+    protected static function getEntityFields(): array
     {
         return [
             'id'         => [
@@ -130,24 +130,27 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
      */
     protected array $escaped = [];
 
-    protected bool $customSchema = false;
+    protected bool $customFields = false;
 
-    protected EntitySchema $schema;
+    /**
+     * Current Entity Fields object
+     */
+    protected EntityFields $fields;
 
-    public function __construct(array $data = [], ?EntitySchema $schema = null)
+    public function __construct(array $data = [], ?EntityFields $fields = null)
     {
         $class = static::class;
 
-        if (!isset(static::$schemas[$class])) {
-            static::resolveSchema();
+        if (!isset(static::$entityFields[$class])) {
+            static::initEntityFields();
         }
 
-        if ($schema === null) {
-            $this->schema = static::$schemas[$class];
+        if ($fields === null) {
+            $this->fields = static::$entityFields[$class];
         } else {
-            $this->schema = $schema;
+            $this->fields = $fields;
 
-            $this->customSchema = true;
+            $this->customFields = true;
         }
 
         $this->attributes = $data;
@@ -155,7 +158,7 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
 
     public function __isset(string $name): bool
     {
-        return array_key_exists($name, $this->attributes) or array_key_exists($name, $this->schema->fields) or isset(static::$getters[static::class][$name]);
+        return array_key_exists($name, $this->attributes) or array_key_exists($name, $this->fields->getFields()) or isset(static::$entityGetters[static::class][$name]);
     }
 
     public function __unset(string $name): void
@@ -171,11 +174,11 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
 
         $class = static::class;
 
-        if (isset(static::$getters[$class][$name])) {
-            $method = static::$getters[$class][$name];
+        if (isset(static::$entityGetters[$class][$name])) {
+            $method = static::$entityGetters[$class][$name];
             $value  = $this->$method();
         } else {
-            $value = $this->schema->caster->fromStorage($this->schema, $name, $this->getAttribute($name));
+            $value = $this->fields->castFromStorage($name, $this->getAttribute($name));
         }
 
         $this->escaped[$name] = $value;
@@ -187,8 +190,8 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
     {
         $class = static::class;
 
-        if (isset(static::$setters[$class][$name])) {
-            $method = static::$setters[$class][$name];
+        if (isset(static::$entitySetters[$class][$name])) {
+            $method = static::$entitySetters[$class][$name];
             $this->$method($value);
         } else {
             $this->setAttribute($name, $value);
@@ -197,12 +200,12 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
 
     public function __call(string $method, array $arguments): mixed
     {
-        if (isset(static::$keys[$method])) {
-            $field = static::$keys[$method];
+        if (isset(static::$entityMethods[$method])) {
+            $field = static::$entityMethods[$method];
         } else {
             $field = strtolower(preg_replace(['/^(?:get|set|has)/', '/(?<!^)([A-Z])/'], ['', '_$1'], $method));
 
-            static::$keys[$method] = $field;
+            static::$entityMethods[$method] = $field;
         }
 
         if (str_starts_with($method, 'get')) {
@@ -228,8 +231,8 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             'changes'    => $this->changes
         ];
 
-        if ($this->customSchema) {
-            $data['schema'] = $this->schema;
+        if ($this->customFields) {
+            $data['fields'] = $this->fields;
         }
 
         return $data;
@@ -240,17 +243,17 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
         $this->attributes = $data['attributes'];
         $this->changes    = $data['changes'];
 
-        if (isset($data['schema'])) {
-            $this->customSchema = true;
-            $this->schema       = $data['schema'];
+        if (isset($data['fields'])) {
+            $this->customFields = true;
+            $this->fields       = $data['fields'];
         } else {
-            $this->customSchema = false;
-            $this->schema       = static::resolveSchema();
+            $this->customFields = false;
+            $this->fields       = static::initEntityFields();
         }
     }
 
     /**
-     * Get entry attributes in the storage format
+     * Get entity attributes in the storage format
      */
     public function getAttributes(): array
     {
@@ -258,7 +261,7 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
     }
 
     /**
-     * Get an entry attribute in the storage format
+     * Get an entity attribute in the storage format
      */
     public function getAttribute(string $field): mixed
     {
@@ -270,11 +273,11 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             return $this->attributes[$field];
         }
 
-        return $this->schema->defaults[$field] ?? null;
+        return $this->fields->getDefaultValue($field);
     }
 
     /**
-     * Set entry attributes
+     * Set entity attributes
      */
     public function setAttributes(array $attributes): void
     {
@@ -284,12 +287,12 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
     }
 
     /**
-     * Set an entry attribute
+     * Set an entity attribute
      */
     public function setAttribute(string $field, mixed $value): bool
     {
         $oldValue = $this->getAttribute($field);
-        $newValue = $this->schema->caster->toStorage($this->schema, $field, $value);
+        $newValue = $this->fields->castToStorage($field, $value);
 
         if ($oldValue === $newValue) {
             return false;
@@ -343,11 +346,11 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
     }
 
     /**
-     * Get Entity Schema Object
+     * Get EntityFields Object
      */
-    public function getSchema(): EntitySchema
+    public function getFields(): EntityFields
     {
-        return $this->schema;
+        return $this->fields;
     }
 
     /**
@@ -358,7 +361,7 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
         if ($onlyChanged) {
             $attributes = $this->getChanges();
         } else {
-            $attributes = $this->getAttributes();
+            $attributes = $this->getAttributes() + $this->fields->getDefaultValues();
         }
 
         if ($recursive) {
@@ -388,7 +391,7 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
      */
     public function getIterator(): Traversable
     {
-        $keys = array_keys($this->getAttributes() + $this->schema->defaults);
+        $keys = array_keys($this->getAttributes() + $this->fields->getDefaultValues());
 
         foreach ($keys as $key) {
             yield $key => $this->__get($key);

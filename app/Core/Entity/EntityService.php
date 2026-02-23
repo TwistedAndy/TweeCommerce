@@ -20,7 +20,6 @@ class EntityService
     protected string $primaryKeyField;
 
     public readonly EntityModel  $entityModel;
-    public readonly EntityCaster $entityCaster;
 
     public function __construct(array $config, Container $container)
     {
@@ -64,19 +63,23 @@ class EntityService
             $DBGroup = $config['entityGroup'];
         }
 
-        $schema = $this->entityClass::resolveSchema($container);
+        $entityFields = $this->entityClass::initEntityFields($container);
 
-        $fields = $schema->fields;
+        $fields = $entityFields->getFields();
+        $casts = $entityFields->getCasts();
 
         $validationRules = [];
 
         $primaryKey  = '';
         $primaryType = '';
+        $allowedFields = [];
 
         foreach ($fields as $key => $field) {
             if (!empty($field['primary'])) {
                 $primaryKey  = $key;
                 $primaryType = $field['type'];
+            } elseif ($casts[$key] !== 'callback') {
+                $allowedFields[] = $key;
             }
 
             if (!array_key_exists('rules', $field)) {
@@ -112,9 +115,8 @@ class EntityService
             'primaryKey'      => $this->primaryKeyField,
             'returnType'      => $this->entityClass,
             'useSoftDeletes'  => $this->useSoftDeletes,
-            'dataCaster'      => $this->entityCaster,
             'validationRules' => $this->validationRules,
-            'allowedFields'   => array_diff(array_keys($fields), [$this->primaryKeyField]),
+            'allowedFields'   => $allowedFields,
         ];
 
         $dateFields = [

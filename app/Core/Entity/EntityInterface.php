@@ -12,9 +12,9 @@ use App\Core\Container\Container;
 interface EntityInterface
 {
     /**
-     * Get an entity caster
+     * Get the default entity fields object
      */
-    public static function resolveSchema(?Container $container = null): EntitySchema;
+    public static function initEntityFields(?Container $container = null): EntityFields;
 
     /**
      * Initializes the entity and triggers one-time static data caching
@@ -64,7 +64,7 @@ interface EntityInterface
     /**
      * Get all attributes with original values
      */
-    public function getSchema(): EntitySchema;
+    public function getFields(): EntityFields;
 
     /**
      * Return current attributes with entities converted to arrays
