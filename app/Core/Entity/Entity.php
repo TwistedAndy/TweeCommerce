@@ -18,14 +18,15 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
      * Entity Field Caches
      */
     protected static array $entityFields  = [];
+    protected static array $entityAliases = [];
+    protected static array $entityMethods = [];
     protected static array $entityGetters = [];
     protected static array $entitySetters = [];
-    protected static array $entityMethods = [];
 
     /**
      * Initialize entity fields and fill entity caches
      */
-    public static function initEntityFields(?Container $container = null): EntityFields
+    public static function initEntity(?Container $container = null): EntityFields
     {
         $class = static::class;
 
@@ -37,11 +38,15 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             $container = Container::getInstance();
         }
 
+        $fields = $container->make(EntityFields::class, [
+            'fields'    => $class::getEntityFields(),
+            'container' => $container,
+        ], $class);
+
+        static::$entityFields[$class]  = $fields;
+        static::$entityAliases[$class] = $class::getEntityAlias();
         static::$entityGetters[$class] = [];
         static::$entitySetters[$class] = [];
-        static::$entityFields[$class]  = $container->make(EntityFields::class, [
-            'fields' => $class::getEntityFields(),
-        ], static::class);
 
         $reflection = new \ReflectionClass($class);
         $methods    = $reflection->getMethods(\ReflectionMethod::IS_PUBLIC);
@@ -51,10 +56,11 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             'getAttribute',
             'setAttributes',
             'setAttribute',
-            'getChanges',
-            'getOriginal',
-            'getFields',
             'getIterator',
+            'getOriginal',
+            'getChanges',
+            'getFields',
+            'getAlias',
         ], true);
 
         foreach ($methods as $method) {
@@ -65,15 +71,31 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             }
 
             if (str_starts_with($name, 'get')) {
-                $key                                 = strtolower(preg_replace('/(?<!^)([A-Z])/', '_$1', substr($name, 3)));
+                $key = strtolower(preg_replace('/(?<!^)([A-Z])/', '_$1', substr($name, 3)));
+
                 static::$entityGetters[$class][$key] = $name;
             } elseif (str_starts_with($name, 'set')) {
-                $key                                 = strtolower(preg_replace('/(?<!^)([A-Z])/', '_$1', substr($name, 3)));
+                $key = strtolower(preg_replace('/(?<!^)([A-Z])/', '_$1', substr($name, 3)));
+
                 static::$entitySetters[$class][$key] = $name;
             }
         }
 
-        return static::$entityFields[$class];
+        return $fields;
+    }
+
+    /**
+     * Reset the static entity caches
+     */
+    public static function resetEntity(): void
+    {
+        $class = static::class;
+
+        static::$entityFields[$class]  = [];
+        static::$entityAliases[$class] = [];
+        static::$entityMethods[$class] = [];
+        static::$entityGetters[$class] = [];
+        static::$entitySetters[$class] = [];
     }
 
     /**
@@ -116,6 +138,14 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
     }
 
     /**
+     * Get the default entity alias
+     */
+    protected static function getEntityAlias(): string
+    {
+        return 'entity';
+    }
+
+    /**
      * Current entity attributes in the storage format
      */
     protected array $attributes = [];
@@ -130,6 +160,8 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
      */
     protected array $escaped = [];
 
+    protected string $alias;
+
     protected bool $customFields = false;
 
     /**
@@ -137,12 +169,12 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
      */
     protected EntityFields $fields;
 
-    public function __construct(array $data = [], ?EntityFields $fields = null)
+    public function __construct(array $data = [], ?string $alias = null, ?EntityFields $fields = null)
     {
         $class = static::class;
 
         if (!isset(static::$entityFields[$class])) {
-            static::initEntityFields();
+            static::initEntity();
         }
 
         if ($fields === null) {
@@ -151,6 +183,12 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             $this->fields = $fields;
 
             $this->customFields = true;
+        }
+
+        if ($alias === null) {
+            $this->alias = static::$entityAliases[$class];
+        } else {
+            $this->alias = $alias;
         }
 
         $this->attributes = $data;
@@ -170,6 +208,10 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
     {
         if (array_key_exists($name, $this->escaped)) {
             return $this->escaped[$name];
+        }
+
+        if ($this->fields->hasRelation($name)) {
+            return $this->getAttribute($name);
         }
 
         $class = static::class;
@@ -228,7 +270,8 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
     {
         $data = [
             'attributes' => $this->attributes,
-            'changes'    => $this->changes
+            'changes'    => $this->changes,
+            'alias'      => $this->alias,
         ];
 
         if ($this->customFields) {
@@ -242,13 +285,14 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
     {
         $this->attributes = $data['attributes'];
         $this->changes    = $data['changes'];
+        $this->alias      = $data['alias'];
 
         if (isset($data['fields'])) {
             $this->customFields = true;
             $this->fields       = $data['fields'];
         } else {
             $this->customFields = false;
-            $this->fields       = static::initEntityFields();
+            $this->fields       = static::initEntity();
         }
     }
 
@@ -263,17 +307,24 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
     /**
      * Get an entity attribute in the storage format
      */
-    public function getAttribute(string $field): mixed
+    public function getAttribute(string $key): mixed
     {
-        if (array_key_exists($field, $this->changes)) {
-            return $this->changes[$field];
+        if (array_key_exists($key, $this->changes)) {
+            return $this->changes[$key];
         }
 
-        if (array_key_exists($field, $this->attributes)) {
-            return $this->attributes[$field];
+        if (array_key_exists($key, $this->attributes)) {
+            return $this->attributes[$key];
         }
 
-        return $this->fields->getDefaultValue($field);
+        if ($this->fields->hasRelation($key)) {
+            $value = $this->fields->getRelation($key)->get($this);
+
+            $this->attributes[$key] = $value;
+            return $value;
+        }
+
+        return $this->fields->getDefaultValue($key);
     }
 
     /**
@@ -291,6 +342,17 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
      */
     public function setAttribute(string $field, mixed $value): bool
     {
+        if ($this->fields->hasRelation($field)) {
+            $value = $this->fields->getRelation($field)->resolve($value);
+
+            $this->attributes[$field] = $value;
+            $this->changes[$field]    = $value;
+
+            unset($this->escaped[$field]);
+
+            return true;
+        }
+
         $oldValue = $this->getAttribute($field);
         $newValue = $this->fields->castToStorage($field, $value);
 
@@ -334,7 +396,10 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
      */
     public function flushChanges(): void
     {
-        $this->changes = [];
+        if ($this->changes) {
+            $this->attributes = $this->changes + $this->attributes;
+            $this->changes    = [];
+        }
     }
 
     /**
@@ -354,6 +419,14 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
     }
 
     /**
+     * Get Entity Alias
+     */
+    public function getAlias(): string
+    {
+        return $this->alias;
+    }
+
+    /**
      * Return current attributes with entities converted to arrays
      */
     public function toRawArray(bool $onlyChanged = false, bool $recursive = false): array
@@ -365,12 +438,18 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
         }
 
         if ($recursive) {
-            return array_map(static function ($value) use ($onlyChanged, $recursive) {
-                if (is_object($value) and is_callable([$value, 'toRawArray'])) {
-                    $value = $value->toRawArray($onlyChanged, $recursive);
+            // Remove 'static' here
+            $map = function ($value) use (&$map, $onlyChanged, $recursive) {
+                if (is_object($value) && is_callable([$value, 'toRawArray'])) {
+                    return $value->toRawArray($onlyChanged, $recursive);
+                }
+                if (is_array($value)) {
+                    return array_map($map, $value);
                 }
                 return $value;
-            }, $attributes);
+            };
+
+            return array_map($map, $attributes);
         }
 
         return $attributes;

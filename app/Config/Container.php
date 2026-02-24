@@ -95,6 +95,7 @@ class Container extends BaseConfig
 
         // Application Classes
         \App\Core\Libraries\Sanitizer::class,
+        \App\Core\Entity\EntityRegistry::class,
     ];
 
     /**

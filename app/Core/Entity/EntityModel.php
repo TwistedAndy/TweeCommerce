@@ -2,6 +2,7 @@
 
 namespace App\Core\Entity;
 
+use App\Core\Container\Container;
 use CodeIgniter\Model;
 use CodeIgniter\Database\Exceptions\DataException;
 use CodeIgniter\Exceptions\InvalidArgumentException;
@@ -16,6 +17,9 @@ class EntityModel extends Model
     protected $dateFormat = 'int';
     protected $returnType = Entity::class;
 
+    protected string        $entityAlias = '';
+    protected ?EntityFields $entityFields;
+
     protected $useSoftDeletes = true;
     protected $useTimestamps  = true;
     protected $protectFields  = false;
@@ -25,10 +29,136 @@ class EntityModel extends Model
     // Callbacks
     protected $beforeFind       = ['beforeFindHandler'];
     protected $afterFind        = ['afterFindHandler'];
-    protected $afterInsert      = ['updateCacheHandler'];
-    protected $afterUpdate      = ['updateCacheHandler'];
-    protected $afterUpdateBatch = ['updateCacheHandler'];
-    protected $afterDelete      = ['deleteCacheHandler'];
+    protected $afterInsert      = ['updateCacheHandler', 'saveRelationsHandler'];
+    protected $afterUpdate      = ['updateCacheHandler', 'saveRelationsHandler'];
+    protected $afterUpdateBatch = ['updateCacheHandler', 'saveRelationsHandler'];
+    protected $afterDelete      = ['deleteCacheHandler', 'deleteRelationsHandler'];
+
+
+    // In EntityModel.php
+    public function insert($row = null, bool $returnID = true): int|string|bool
+    {
+        $result = parent::insert($row, $returnID);
+
+        if ($result !== false and $row instanceof EntityInterface) {
+            // If this is an insert, inject the new DB ID back into the Entity
+            if ($returnID and !is_bool($result)) {
+                $row->setAttribute($this->primaryKey, $result);
+            }
+
+            // Save relations manually using the original object
+            $this->saveRelations($row);
+            $row->flushChanges();
+        }
+
+        return $result;
+    }
+
+    public function update($id = null, $row = null): bool
+    {
+        $result = parent::update($id, $row);
+
+        if ($result !== false and $row instanceof EntityInterface) {
+            $this->saveRelations($row);
+            $row->flushChanges();
+        }
+
+        return $result;
+    }
+
+    protected function saveRelations(EntityInterface $entity): void
+    {
+        $relations = $entity->getFields()->getRelationKeys();
+        $changes   = $entity->getChanges();
+
+        $changes = array_intersect_key($changes, array_flip($relations));
+
+        foreach ($changes as $field => $value) {
+            $relation = $entity->getFields()->getRelation($field);
+            if ($relation instanceof EntityRelation) {
+                $relation->update($entity, $value);
+            }
+        }
+    }
+
+    /**
+     * Get an entity by the primary key
+     */
+    public function findOne(int|string $id): EntityInterface|false
+    {
+        $row = $this->find($id);
+
+        if (empty($row)) {
+            return false;
+        }
+
+        if ($row instanceof EntityInterface) {
+            return $row;
+        }
+
+        return new $this->returnType($row, $this->entityAlias);
+    }
+
+    /**
+     * Get an array of entities by the primary key
+     *
+     * @param int[]|string[] $ids
+     *
+     * @return EntityInterface[]
+     */
+    public function findMany(array $ids): array
+    {
+        $rows = $this->find($ids);
+
+        if (empty($rows)) {
+            return [];
+        }
+
+        $entities = [];
+
+        foreach ($rows as $row) {
+            $entities[] = new $this->returnType($row, $this->entityAlias);
+        }
+
+        return $entities;
+    }
+
+    /**
+     * Find entities by field value
+     *
+     * @param string $field
+     * @param int|string|array $value
+     *
+     * @return Entity[]
+     */
+    public function findByField(string $field, int|string|array $value): array
+    {
+        $builder = $this->builder();
+
+        if (is_array($value)) {
+            $query = $builder->whereIn($field, $value);
+        } else {
+            $query = $builder->where($field, $value);
+        }
+
+        if ($this->useSoftDeletes) {
+            $builder->where($this->table . '.' . $this->deletedField, null);
+        }
+
+        $rows = $query->get()->getResultArray();
+
+        if (empty($rows)) {
+            return [];
+        }
+
+        $entities = [];
+
+        foreach ($rows as $row) {
+            $entities[] = new $this->returnType($row, $this->entityAlias);
+        }
+
+        return $entities;
+    }
 
     /**
      * Returns the id value for the data array or object
@@ -56,7 +186,7 @@ class EntityModel extends Model
     public function configure(array $config): void
     {
         if ($this->isLocked) {
-            throw new EntityException('It is not possible to re-confirure the locked model.');
+            throw new EntityException('It is not possible to re-configure the locked model.');
         }
 
         foreach ($config as $field => $value) {
@@ -66,6 +196,71 @@ class EntityModel extends Model
         }
 
         $this->isLocked = true;
+    }
+
+    /**
+     * Handle the relations saving
+     */
+    protected function saveRelationsHandler(array $data): array
+    {
+        if (empty($data['data']) or !($data['data'] instanceof EntityInterface)) {
+            return $data;
+        }
+
+        $entity  = $data['data'];
+        $changes = $entity->getChanges();
+
+        foreach ($changes as $field => $value) {
+            if ($entity->getFields()->hasRelation($field)) {
+                $relation = $entity->getFields()->getRelation($field);
+                $relation->update($entity, $value);
+            }
+        }
+
+        return $data;
+    }
+
+    /*
+     * Handle the relations removal
+     */
+    protected function deleteRelationsHandler(array $data): array
+    {
+        if (empty($data['id']) or empty($data['purge']) or empty($this->entityAlias) or empty($this->entityFields)) {
+            return $data;
+        }
+
+        $entityClass = $this->returnType;
+
+        if (!is_subclass_of($entityClass, EntityInterface::class)) {
+            return $data;
+        }
+
+        $pivotRelations = [];
+
+        $relationKeys = $this->entityFields->getRelationKeys();
+
+        foreach ($relationKeys as $key => $field) {
+            if ($this->entityFields->getRelationType($key) === 'belongs-many') {
+                $pivotRelations[] = $this->entityFields->getRelation($key);
+            }
+        }
+
+        if (empty($pivotRelations)) {
+            return $data;
+        }
+
+        // Wipe the pivot records for each deleted ID
+        foreach ($data['id'] as $id) {
+            foreach ($pivotRelations as $relation) {
+                try {
+                    $relation->remove($id, $this->entityAlias);
+                } catch (EntityException $e) {
+                    continue;
+                }
+            }
+        }
+
+        return $data;
     }
 
     /**
@@ -200,7 +395,6 @@ class EntityModel extends Model
             }
 
             return $data;
-
         }
 
         /**
@@ -251,12 +445,8 @@ class EntityModel extends Model
      */
     protected function convertToReturnType(array $row, string $returnType): array|object
     {
-        foreach ($row as $field => $value) {
-            $row[$field] = $this->dataCaster->fromStorage($field, $value);
-        }
-
         if ($returnType === $this->returnType) {
-            return new $returnType($row);
+            return new $returnType($row, $this->entityAlias);
         }
 
         if ($returnType === 'array') {
@@ -305,8 +495,10 @@ class EntityModel extends Model
             $row = $this->objectToArray($row, $onlyChanged);
         }
 
-        foreach ($row as $field => $value) {
-            $row[$field] = $this->dataCaster->toStorage($value, $type);
+        if (!empty($this->allowedFields)) {
+            $safeFields   = $this->allowedFields;
+            $safeFields[] = $this->primaryKey;
+            $row          = array_intersect_key($row, array_flip($safeFields));
         }
 
         if (!$this->allowEmptyInserts and empty($row)) {
@@ -315,5 +507,4 @@ class EntityModel extends Model
 
         return $row;
     }
-
 }

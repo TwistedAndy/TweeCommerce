@@ -354,23 +354,31 @@ class Container implements ContainerInterface
 
         if (is_string($callback)) {
             $callbackKey = $callback;
+
             if (!function_exists($callback)) {
-                if (str_contains($callback, '@')) {
-                    [$parsedClass, $parsedMethod] = explode('@', $callback);
-                } elseif (str_contains($callback, '::')) {
+                if (str_contains($callback, '::')) {
                     [$parsedClass, $parsedMethod] = explode('::', $callback);
                 } elseif (class_exists($callback)) {
                     $parsedClass  = $callback;
                     $parsedMethod = $defaultMethod ?? '__invoke';
                 }
             }
+        } elseif (is_array($callback) and !empty($callback[0])) {
+            if (empty($callback[1])) {
+                $parsedMethod = $defaultMethod ?? '__invoke';
+            } else {
+                $parsedMethod = $callback[1];
+            }
+
+            if (is_object($callback[0])) {
+                $parsedClass = $callback[0]::class;
+            } else {
+                $parsedClass = $callback[0];
+            }
+
+            $callbackKey = $parsedClass . '::' . $parsedMethod;
         } else {
             $callbackKey = $this->getCallbackKey($callback);
-
-            if (is_array($callback) and isset($callback[0]) and is_string($callback[0])) {
-                $parsedClass  = $callback[0];
-                $parsedMethod = $callback[1] ?? '__invoke';
-            }
         }
 
         // Check function cache or use a reflection
@@ -408,7 +416,7 @@ class Container implements ContainerInterface
             }
         }
 
-        $instances = $this->resolveDependencies($contextName, $dependencies, $parameters);
+        $dependencies = $this->resolveDependencies($contextName, $dependencies, $parameters);
 
         if ($parsedClass) {
 
@@ -424,10 +432,10 @@ class Container implements ContainerInterface
         }
 
         if (is_array($callback)) {
-            return call_user_func_array($callback, $instances);
+            return call_user_func_array($callback, $dependencies);
         }
 
-        return $callback(...$instances);
+        return $callback(...$dependencies);
     }
 
     /**
@@ -1034,17 +1042,11 @@ class Container implements ContainerInterface
 
         $contextKey = $className;
 
-        if (!isset($this->contextual[$className])) {
-            if (str_contains($className, '::')) {
-                $parts = explode('::', $className, 2);
-                if (isset($this->contextual[$parts[0]])) {
-                    $contextKey = $parts[0];
-                }
-            } elseif (str_contains($className, '@')) {
-                $parts = explode('@', $className, 2);
-                if (isset($this->contextual[$parts[0]])) {
-                    $contextKey = $parts[0];
-                }
+        if (!isset($this->contextual[$className]) and str_contains($className, '::')) {
+            $parts = explode('::', $className, 2);
+
+            if (isset($this->contextual[$parts[0]])) {
+                $contextKey = $parts[0];
             }
         }
 

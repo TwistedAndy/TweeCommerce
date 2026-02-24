@@ -3,36 +3,24 @@
 namespace Config;
 
 use CodeIgniter\Config\BaseConfig;
-use App\Core\Container\Container;
+use \App\Core\Entity\EntityInterface;
 
 class Entities extends BaseConfig
 {
     /**
-     * Map of Alias => Configuration
+     * Map of Entity classes to their database properties and services.
+     *
+     * @var array<class-string<EntityInterface>, array>
      */
-    public array $types = [
+    public array $entities = [
         'posts' => [
-            'table'   => 'posts',
-            'service' => \App\Core\Entity\EntityService::class,
-            'model'   => \App\Core\Entity\EntityModel::class
-        ],
-        'users' => [
-            'table'   => 'users',
-            'service' => \App\Core\Entity\EntityService::class,
-            'model'   => \App\Core\Entity\EntityModel::class
+            'entity'   => \App\Core\Entity\Entity::class,
+            'table'    => 'posts',
+            'db_group' => '',
+            'pivots'   => [
+                // '\App\Entities\TagEntity::class' => 'post_tags'
+            ]
         ],
     ];
-
-    public function registerEntities(Container $container): void
-    {
-        foreach ($this->types as $alias => $config) {
-            $container->singleton('entity.' . $alias, function () use ($container, $config) {
-                return $container->make($config['service'], [
-                    'config'    => $config,
-                    'container' => $container,
-                ]);
-            });
-        }
-    }
 
 }

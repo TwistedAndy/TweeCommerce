@@ -13,9 +13,12 @@ use DateTimeInterface;
  */
 class EntityFields
 {
+    protected Container $container;
     protected Sanitizer $sanitizer;
 
     protected string $primaryKey   = '';
+    protected array  $relationData = [];
+    protected array  $relations    = [];
     protected array  $fields       = [];
     protected array  $defaults     = [];
     protected array  $nullable     = [];
@@ -24,53 +27,105 @@ class EntityFields
     protected array  $castHandlers = [];
     protected array  $dateFormats  = [];
 
+    protected const DATE_FORMATS = [
+        'time'        => 'H:i:s',
+        'date'        => 'Y-m-d',
+        'datetime'    => 'Y-m-d H:i:s',
+        'datetime-ms' => 'Y-m-d H:i:s.v',
+        'datetime-us' => 'Y-m-d H:i:s.u',
+    ];
+
     /**
      * Create a new EntityFields object
      *
-     * @see https://codeigniter.com/user_guide/models/model.html#custom-casting,
+     * @see    https://codeigniter.com/user_guide/models/model.html#custom-casting,
      *      https://codeigniter.com/user_guide/libraries/validation.html#setting-validation-rules
      *
+     *  Field Options:
+     *  - primary:  Primary Key Flag
+     *  - label:    Field Label
+     *  - default:  Default Value in the storage format
+     *  - type:     Casting Type or Casting Class Name
+     *  - rules:    Validation rules and custom error messages
+     *  - relation: Relation Configuration
+     *
      * @param array<string, array{
-     *   primary?: (bool),         // Primary Key Flag
-     *   label?:   (string),       // Field Label
-     *   default?: (mixed),        // Default Value in the storage format
-     *   type?:    (string),       // Casting Type or Casting Class Name
-     *   rules?:   (string|array), // Validation Rules
+     *   primary?:  bool,
+     *   label?:    string,
+     *   default?:  mixed,
+     *   type?:     string,
+     *   rules?:    string|array{
+     *     rules: string|array<string, string>,
+     *     errors?: array<string, string>
+     *   },
+     *   relation?: array{
+     *     type:         string,
+     *     related:      string,
+     *     local_key?:   string,
+     *     foreign_key?: string,
+     *   },
      * }> $fields
+     * @param Container $container
+     * @param Sanitizer $sanitizer
      */
-    public function __construct(array $fields, ?Sanitizer $sanitizer = null)
+    public function __construct(array $fields, Container $container, Sanitizer $sanitizer)
     {
         foreach ($fields as $key => $field) {
-            $this->fields[$key] = $this->addField($key, $field);
+            $this->addField($key, $field);
         }
 
         if (empty($this->primaryKey)) {
             throw new EntityException('No primary key is specified for an entity');
         }
 
-        if ($sanitizer instanceof Sanitizer) {
-            $this->sanitizer = $sanitizer;
-        } else {
-            $this->sanitizer = Container::getInstance()->make(Sanitizer::class, [], static::class);
+        $this->container = $container;
+        $this->sanitizer = $sanitizer;
+
+        foreach ($this->fields as $key => $field) {
+            if ($field['type'] === 'relation') {
+                if (empty($field['relation']) or !is_array($field['relation'])) {
+                    throw new EntityException('An entity relation field requires relation data specified');
+                }
+
+                $this->addRelation($key, $field['relation']);
+            }
         }
     }
 
     /**
-     * Normalize a field
+     * Exclude the $relationData property from serialization
      */
-    public function addField(string $key, array $field): array
+    public function __serialize(): array
     {
-        if (isset($this->fields[$key])) {
-            throw new EntityException('Field "' . $key . '" already exists');
+        $data = get_object_vars($this);
+
+        unset($data['relations']);
+        unset($data['container']);
+
+        return $data;
+    }
+
+    /**
+     * Restore the object after serialization.
+     */
+    public function __unserialize(array $data): void
+    {
+        foreach ($data as $key => $value) {
+            $this->$key = $value;
         }
 
-        $dateFormatMap = [
-            'time'        => 'H:i:s',
-            'date'        => 'Y-m-d',
-            'datetime'    => 'Y-m-d H:i:s',
-            'datetime-ms' => 'Y-m-d H:i:s.v',
-            'datetime-us' => 'Y-m-d H:i:s.u',
-        ];
+        $this->relations = [];
+        $this->container = Container::getInstance();
+    }
+
+    /**
+     * Add an entity field
+     */
+    public function addField(string $key, array $field): void
+    {
+        if (isset($this->fields[$key])) {
+            throw new EntityException("A field '{$key}' is already defined");
+        }
 
         if (empty($field['type'])) {
             $field['type'] = 'text';
@@ -116,13 +171,13 @@ class EntityFields
             $this->castHandlers[$key] = $cast;
         }
 
-        if (!empty($dateFormatMap[$cast])) {
-            $this->dateFormats[$key] = $dateFormatMap[$cast];
+        if (!empty(self::DATE_FORMATS[$cast])) {
+            $this->dateFormats[$key] = self::DATE_FORMATS[$cast];
         }
 
         $this->casts[$key] = $cast;
 
-        unset($field['type'], $field['default']);
+        $field['type'] = $cast;
 
         if (empty($field['label'])) {
             $field['label'] = ucwords(str_replace('_', ' ', $key));
@@ -130,7 +185,7 @@ class EntityFields
             $field['label'] = (string) $field['label'];
         }
 
-        if (array_key_exists('rules', $field)) {
+        if (!empty($field['rules'])) {
             if (is_string($field['rules'])) {
                 $field['rules'] = [
                     'rules' => $field['rules'],
@@ -145,7 +200,7 @@ class EntityFields
                 throw new EntityException("Failed to initialize field rules for '{$key}'");
             }
 
-            if (array_key_exists('errors', $field)) {
+            if (!empty($field['errors']) and is_array($field['errors'])) {
                 $field['rules']['errors'] = $field['errors'];
                 unset($field['errors']);
             }
@@ -157,7 +212,100 @@ class EntityFields
             $this->defaults[$key] = $isNullable ? null : $this->getCastDefault($cast);
         }
 
-        return $field;
+        $field['default'] = $this->defaults[$key];
+
+        $this->fields[$key] = $field;
+    }
+
+    /**
+     * Add a new relation
+     *
+     * @param string $key
+     * @param array{
+     *   type:         string,
+     *   related:      string,
+     *   local_key?:   string,
+     *   foreign_key?: string,
+     * } $relation
+     */
+    public function addRelation(string $key, array $relation): void
+    {
+        if (isset($this->relationData[$key])) {
+            throw new EntityException("A relation key '{$key}' is already defined");
+        }
+
+        if (empty($relation['related']) or is_string($relation['related'])) {
+            throw new EntityException('A related alias is not specified for the "' . $key . '" relation.');
+        }
+
+        if (empty($relation['type'])) {
+            throw new EntityException('A relation type is not specified for the "' . $key . '" relation.');
+        }
+
+        if (!is_string($relation['type']) or !in_array($relation['type'], ['has-one', 'has-many', 'belongs-one', 'belongs-many'])) {
+            throw new EntityException('Unsupported type for the "' . $key . '" relation. Supported values: has-one, has-many, belongs-one, or belongs-many');
+        }
+
+        if (empty($relation['local_key']) or !is_string($relation['local_key'])) {
+            $relation['local_key'] = $this->primaryKey;
+        }
+
+        if (empty($relation['foreign_key']) or !is_string($relation['foreign_key'])) {
+            $relation['foreign_key'] = '';
+        }
+
+        $this->relationData[$key] = [
+            'type'        => $relation['type'],
+            'related'     => $relation['related'],
+            'local_key'   => $relation['local_key'],
+            'foreign_key' => $relation['foreign_key'],
+        ];
+    }
+
+    /**
+     * Check if a field contains a relation
+     */
+    public function hasRelation(string $key): bool
+    {
+        return isset($this->relationData[$key]);
+    }
+
+    /**
+     * Get a relation object
+     */
+    public function getRelation(string $key): EntityRelation|null
+    {
+        if (isset($this->relations[$key])) {
+            return $this->relations[$key];
+        }
+
+        if (!isset($this->relationData[$key])) {
+            return null;
+        }
+
+        $relation = Container::getInstance()->make(EntityRelation::class, [
+            'relation' => $this->relationData[$key]
+        ]);
+
+        $this->relations[$key] = $relation;
+
+        return $relation;
+    }
+
+    /**
+     * Get relation keys
+     */
+    public function getRelationKeys(): array
+    {
+        return array_keys($this->relationData);
+    }
+
+    /**
+     * Get a relation type
+     */
+    public function getRelationType(string $key): string
+    {
+        return isset($this->relationData[$key]) ? $this->relationData[$key]['type'] : '';
     }
 
     /**
@@ -225,7 +373,7 @@ class EntityFields
      */
     public function castToStorage(string $field, $value)
     {
-        if (!array_key_exists($field, $this->casts) or ($value === null and isset($this->nullable[$field]))) {
+        if (!isset($this->casts[$field]) or ($value === null and isset($this->nullable[$field]))) {
             return $value;
         }
 
@@ -336,7 +484,7 @@ class EntityFields
      */
     public function castFromStorage(string $field, $value)
     {
-        if (!array_key_exists($field, $this->casts) or ($value === null and isset($this->nullable[$field]))) {
+        if (!isset($this->casts[$field]) or ($value === null and isset($this->nullable[$field]))) {
             return $value;
         }
 

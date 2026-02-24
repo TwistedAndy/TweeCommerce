@@ -14,12 +14,17 @@ interface EntityInterface
     /**
      * Get the default entity fields object
      */
-    public static function initEntityFields(?Container $container = null): EntityFields;
+    public static function initEntity(?Container $container = null): EntityFields;
+
+    /**
+     * Reset the static entity caches
+     */
+    public static function resetEntity(): void;
 
     /**
      * Initializes the entity and triggers one-time static data caching
      */
-    public function __construct(array $data = []);
+    public function __construct(array $data = [], ?string $alias = null, ?EntityFields $fields = null);
 
     /**
      * Get raw entry attributes
@@ -29,7 +34,7 @@ interface EntityInterface
     /**
      * Get a raw entry attribute
      */
-    public function getAttribute(string $field): mixed;
+    public function getAttribute(string $key): mixed;
 
     /**
      * Set some or all entry attributes
@@ -65,6 +70,11 @@ interface EntityInterface
      * Get all attributes with original values
      */
     public function getFields(): EntityFields;
+
+    /**
+     * Get Entity Alias
+     */
+    public function getAlias(): string;
 
     /**
      * Return current attributes with entities converted to arrays
