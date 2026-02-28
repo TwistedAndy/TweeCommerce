@@ -2,105 +2,264 @@
 
 namespace App\Core\Entity;
 
-use App\Core\Container\Container;
-use CodeIgniter\Model;
-use CodeIgniter\Database\Exceptions\DataException;
-use CodeIgniter\Exceptions\InvalidArgumentException;
+use CodeIgniter\Database\BaseConnection;
+use CodeIgniter\Database\BaseBuilder;
+use BadMethodCallException;
+use CodeIgniter\Validation\ValidationInterface;
 
-use ReflectionException;
-
-class EntityModel extends Model
+/**
+ * CI4-Native Data Mapper / Repository model.
+ * Translates pure Entity objects to and from the database using CI4's native Builder proxying.
+ */
+class EntityModel
 {
-    protected static array $entityCache = [];
+    protected static array $identityMap      = [];
+    protected static int   $identityMapLimit = 10000;
 
-    protected $primaryKey = 'id';
-    protected $dateFormat = 'int';
-    protected $returnType = Entity::class;
+    protected ?string        $DBGroup;
+    protected ?BaseBuilder   $builder = null;
+    protected BaseConnection $db;
 
-    protected string        $entityAlias = '';
-    protected ?EntityFields $entityFields;
+    protected string         $table;
+    protected string         $primaryKey;
+    protected string         $entityClass;
+    protected string         $entityAlias;
+    protected EntityFields   $entityFields;
+    protected EntityRegistry $registry;
 
-    protected $useSoftDeletes = true;
-    protected $useTimestamps  = true;
-    protected $protectFields  = false;
+    protected string $dateFormat   = 'U';
+    protected string $deletedField = 'deleted_at';
+    protected string $createdField = 'created_at';
+    protected string $updatedField = 'updated_at';
 
-    protected bool $isLocked = false;
+    protected bool $useSoftDeletes = false;
+    protected bool $useTimestamps  = false;
 
-    // Callbacks
-    protected $beforeFind       = ['beforeFindHandler'];
-    protected $afterFind        = ['afterFindHandler'];
-    protected $afterInsert      = ['updateCacheHandler', 'saveRelationsHandler'];
-    protected $afterUpdate      = ['updateCacheHandler', 'saveRelationsHandler'];
-    protected $afterUpdateBatch = ['updateCacheHandler', 'saveRelationsHandler'];
-    protected $afterDelete      = ['deleteCacheHandler', 'deleteRelationsHandler'];
+    protected array $withRelations = [];
 
+    protected ValidationInterface $validator;
 
-    // In EntityModel.php
-    public function insert($row = null, bool $returnID = true): int|string|bool
-    {
-        $result = parent::insert($row, $returnID);
-
-        if ($result !== false and $row instanceof EntityInterface) {
-            // If this is an insert, inject the new DB ID back into the Entity
-            if ($returnID and !is_bool($result)) {
-                $row->setAttribute($this->primaryKey, $result);
-            }
-
-            // Save relations manually using the original object
-            $this->saveRelations($row);
-            $row->flushChanges();
-        }
-
-        return $result;
-    }
-
-    public function update($id = null, $row = null): bool
-    {
-        $result = parent::update($id, $row);
-
-        if ($result !== false and $row instanceof EntityInterface) {
-            $this->saveRelations($row);
-            $row->flushChanges();
-        }
-
-        return $result;
-    }
-
-    protected function saveRelations(EntityInterface $entity): void
-    {
-        $relations = $entity->getFields()->getRelationKeys();
-        $changes   = $entity->getChanges();
-
-        $changes = array_intersect_key($changes, array_flip($relations));
-
-        foreach ($changes as $field => $value) {
-            $relation = $entity->getFields()->getRelation($field);
-            if ($relation instanceof EntityRelation) {
-                $relation->update($entity, $value);
-            }
-        }
-    }
+    protected array $allowedFields        = [];
+    protected array $validationRules      = [];
+    protected array $validationErrors     = [];
+    protected bool  $cleanValidationRules = true;
+    protected bool  $skipValidation       = false;
 
     /**
-     * Get an entity by the primary key
+     * Configure the maximum number of records held in the Identity Map.
      */
-    public function findOne(int|string $id): EntityInterface|false
+    public static function setIdentityMapLimit(int $limit): void
     {
-        $row = $this->find($id);
-
-        if (empty($row)) {
-            return false;
-        }
-
-        if ($row instanceof EntityInterface) {
-            return $row;
-        }
-
-        return new $this->returnType($row, $this->entityAlias);
+        static::$identityMapLimit = $limit;
     }
 
     /**
-     * Get an array of entities by the primary key
+     * Get an entity from the map and mark it as recently used (LRU).
+     */
+    protected static function getFromIdentityMap(string $key): ?EntityInterface
+    {
+        if (isset(static::$identityMap[$key])) {
+            $entity = static::$identityMap[$key];
+
+            // Move to the end of the array
+            unset(static::$identityMap[$key]);
+            static::$identityMap[$key] = $entity;
+
+            return $entity;
+        }
+
+        return null;
+    }
+
+    /**
+     * Add an entity to the map and enforce the LRU limit.
+     */
+    protected static function addToIdentityMap(string $key, EntityInterface $entity): void
+    {
+        // If it exists, unset it first so it moves to the end of the array
+        if (isset(static::$identityMap[$key])) {
+            unset(static::$identityMap[$key]);
+        }
+
+        static::$identityMap[$key] = $entity;
+
+        // Enforce the size limit (if limit is greater than 0)
+        if (static::$identityMapLimit > 0 && count(static::$identityMap) > static::$identityMapLimit) {
+            // array_key_first() is O(1) performance. Drops the oldest, least recently used record.
+            $oldestKey = array_key_first(static::$identityMap);
+            if ($oldestKey !== null) {
+                unset(static::$identityMap[$oldestKey]);
+            }
+        }
+    }
+
+    /**
+     * Remove an entity from the map.
+     */
+    protected static function deleteFromIdentityMap(string $key): void
+    {
+        unset(static::$identityMap[$key]);
+    }
+
+    /**
+     * Clean the identity cache
+     */
+    public static function clearIdentityMap(): void
+    {
+        static::$identityMap = [];
+    }
+
+    public function __construct(string $alias, EntityRegistry $registry, ValidationInterface $validator)
+    {
+        $entityFields = $registry->getEntityFields($alias);
+
+        if ($entityFields === null) {
+            throw new EntityException('There is no entity with specified alias: ' . $alias);
+        }
+
+        $this->entityAlias  = $alias;
+        $this->entityClass  = $registry->getEntityClass($alias);
+        $this->entityFields = $entityFields;
+        $this->registry     = $registry;
+
+        $this->DBGroup = $registry->getDatabaseGroup($alias);
+
+        $this->db    = \Config\Database::connect($this->DBGroup);
+        $this->table = $registry->getEntityTable($alias);
+
+        $this->validator    = $validator;
+        $this->primaryKey   = $entityFields->getPrimaryKey();
+        $this->createdField = $entityFields->getCreatedKey();
+        $this->updatedField = $entityFields->getUpdatedKey();
+        $this->deletedField = $entityFields->getDeletedKey();
+
+        $allowedFields   = [];
+        $validationRules = [];
+
+        $fieldList  = $entityFields->getFields();
+        $primaryKey = $entityFields->getPrimaryKey();
+
+        foreach ($fieldList as $key => $field) {
+
+            if ($key != $primaryKey and !$entityFields->hasRelation($key)) {
+                $allowedFields[] = $key;
+            }
+
+            if (empty($field['rules']) or !is_array($field['rules']) or empty($field['rules']['rules'])) {
+                continue;
+            }
+
+            $rule = [];
+
+            if (!empty($field['label'])) {
+                $rule['label'] = $field['label'];
+            }
+
+            $rules = $field['rules']['rules'];
+
+            if (is_string($rules)) {
+                $rules = str_replace('{table}', $this->table, $rules);
+            } elseif (is_array($rules)) {
+                foreach ($rules as $index => $rule) {
+                    $rules[$index] = str_replace('{table}', $this->table, $rule);
+                }
+            }
+
+            $rule['rules'] = $rules;
+
+            if (!empty($field['rules']['errors'])) {
+                $rule['errors'] = $field['rules']['errors'];
+            }
+
+            $validationRules[$key] = $rule;
+        }
+
+        $this->useTimestamps  = ($this->createdField or $this->updatedField);
+        $this->useSoftDeletes = (bool) $this->deletedField;
+
+        $this->allowedFields   = $allowedFields;
+        $this->validationRules = $validationRules;
+
+        if ($this->createdField) {
+            $dateFormat = $entityFields->getDateFormat($this->createdField);
+
+            if ($dateFormat) {
+                $this->dateFormat = $dateFormat;
+            }
+        } elseif ($this->updatedField) {
+            $dateFormat = $entityFields->getDateFormat($this->updatedField);
+
+            if ($dateFormat) {
+                $this->dateFormat = $dateFormat;
+            }
+        }
+
+    }
+
+    public function __invoke(): BaseBuilder
+    {
+        return $this->builder();
+    }
+
+    /**
+     * Proxies missing methods directly to the native CI4 Query Builder.
+     */
+    public function __call(string $name, array $params)
+    {
+        $builder = $this->builder();
+
+        if (method_exists($builder, $name)) {
+            $result = $builder->{$name}(...$params);
+
+            if ($result instanceof BaseBuilder) {
+                return $this;
+            }
+
+            return $result;
+        }
+
+        throw new BadMethodCallException("Method {$name} does not exist on EntityModel or BaseBuilder.");
+    }
+
+    /**
+     * Get the active Query Builder for this model's table.
+     */
+    public function builder(?string $table = null): BaseBuilder
+    {
+        $targetTable = $table ?? $this->table;
+
+        if ($this->builder === null or $this->builder->getTable() !== $targetTable) {
+            $this->builder = $this->db->table($targetTable);
+        }
+
+        return $this->builder;
+    }
+
+    /**
+     * Queue relations to be loaded to prevent N+1 queries.
+     */
+    public function with(array|string $relations): self
+    {
+        $this->withRelations = is_string($relations) ? func_get_args() : $relations;
+        return $this;
+    }
+
+    public function find(int|string $id): ?EntityInterface
+    {
+        $cacheKey = $this->entityAlias . '_' . $id;
+
+        if (isset(static::$identityMap[$cacheKey])) {
+            return static::getFromIdentityMap($cacheKey);
+        }
+
+        // Apply condition natively to the builder, then explicitly call the model's first() method
+        $this->builder()->where($this->primaryKey, $id);
+
+        return $this->first();
+    }
+
+    /**
+     * Get entities with selected IDs
      *
      * @param int[]|string[] $ids
      *
@@ -108,403 +267,395 @@ class EntityModel extends Model
      */
     public function findMany(array $ids): array
     {
-        $rows = $this->find($ids);
-
-        if (empty($rows)) {
+        if (empty($ids)) {
             return [];
+        }
+
+        // Do not cache the relations
+        if (!empty($this->withRelations)) {
+            // Apply condition natively to the builder, then explicitly call the model's findAll() method
+            $this->builder()->whereIn($this->primaryKey, $ids);
+            return $this->findAll();
+        }
+
+        $missingIds = [];
+
+        $exitingEntities = [];
+
+        foreach ($ids as $id) {
+            $cacheKey = $this->entityAlias . '_' . $id;
+
+            if (isset(static::$identityMap[$cacheKey])) {
+                $exitingEntities[$id] = static::getFromIdentityMap($cacheKey);
+            } else {
+                $missingIds[] = $id;
+            }
         }
 
         $entities = [];
 
-        foreach ($rows as $row) {
-            $entities[] = new $this->returnType($row, $this->entityAlias);
+        if ($missingIds) {
+
+            $this->builder()->whereIn($this->primaryKey, $missingIds);
+
+            $foundEntities = $this->findAll();
+
+            if ($foundEntities) {
+                foreach ($foundEntities as $entity) {
+                    $exitingEntities[$entity->getAttribute($this->primaryKey)] = $entity;
+                }
+            }
+
+            // Reorder the entities
+            foreach ($ids as $id) {
+                if (isset($exitingEntities[$id])) {
+                    $entities[$id] = $exitingEntities[$id];
+                }
+            }
+        } else {
+            $entities = $exitingEntities;
         }
 
-        return $entities;
+        return array_values($entities);
     }
 
     /**
-     * Find entities by field value
+     * Find all records matching conditions
      *
-     * @param string $field
-     * @param int|string|array $value
-     *
-     * @return Entity[]
+     * @return EntityInterface[]
      */
-    public function findByField(string $field, int|string|array $value): array
+    public function findAll(): array
     {
         $builder = $this->builder();
-
-        if (is_array($value)) {
-            $query = $builder->whereIn($field, $value);
-        } else {
-            $query = $builder->where($field, $value);
-        }
 
         if ($this->useSoftDeletes) {
             $builder->where($this->table . '.' . $this->deletedField, null);
         }
 
-        $rows = $query->get()->getResultArray();
+        $rows = $builder->get()->getResultArray();
 
-        if (empty($rows)) {
-            return [];
-        }
+        $entities = array_map([$this, 'hydrateRow'], $rows);
 
-        $entities = [];
-
-        foreach ($rows as $row) {
-            $entities[] = new $this->returnType($row, $this->entityAlias);
+        if ($this->withRelations) {
+            $this->loadRelations($entities);
         }
 
         return $entities;
     }
 
-    /**
-     * Returns the id value for the data array or object
-     */
-    public function getIdValue(mixed $row): int|string|null
+    public function first(): ?EntityInterface
     {
-        if ($row instanceof EntityInterface) {
-            return $row->getAttribute($this->primaryKey);
+        $builder = $this->builder();
+
+        if ($this->useSoftDeletes) {
+            $builder->where($this->table . '.' . $this->deletedField, null);
         }
 
-        if (is_array($row)) {
-            return $row[$this->primaryKey] ?? null;
+        // CI4 auto-resets the builder state after get()
+        $row = $builder->get()->getRowArray();
+
+        if (!$row) {
+            $this->withRelations = []; // Clear eager load queue if no result
+            return null;
         }
 
-        if (is_object($row) and isset($row->{$this->primaryKey})) {
-            return $row->{$this->primaryKey};
+        $entity = $this->hydrateRow($row);
+
+        if ($this->withRelations) {
+            $this->loadRelations([$entity]);
         }
 
-        return null;
+        return $entity;
     }
 
-    /**
-     * Configure a model once
-     */
-    public function configure(array $config): void
+    public function save(EntityInterface $entity): bool
     {
-        if ($this->isLocked) {
-            throw new EntityException('It is not possible to re-configure the locked model.');
-        }
-
-        foreach ($config as $field => $value) {
-            if (property_exists($this, $field)) {
-                $this->{$field} = $value;
-            }
-        }
-
-        $this->isLocked = true;
+        $id = $entity->getAttribute($this->primaryKey);
+        return (empty($id)) ? $this->insert($entity) : $this->update($id, $entity);
     }
 
-    /**
-     * Handle the relations saving
-     */
-    protected function saveRelationsHandler(array $data): array
+    public function insert(EntityInterface $entity): bool
     {
-        if (empty($data['data']) or !($data['data'] instanceof EntityInterface)) {
-            return $data;
+        // Inserts must validate all rules, so we temporarily enforce strict validation
+        $cleanRules = $this->cleanValidationRules;
+
+        $this->cleanValidationRules = false;
+
+        if (!$this->validate($entity)) {
+            $this->cleanValidationRules = $cleanRules;
+            return false;
         }
 
-        $entity  = $data['data'];
+        $this->cleanValidationRules = $cleanRules;
+
+        if ($this->createdField) {
+            $entity->setAttribute($this->createdField, time());
+        }
+
+        $data = $entity->getAttributes();
+
+        $data = array_intersect_key($data, $this->entityFields->getFields());
+
+        if (empty($data)) {
+            return false;
+        }
+
+        if ($this->builder()->insert($data)) {
+            $insertId = $this->db->insertID();
+            $entity->setAttribute($this->primaryKey, $insertId);
+
+            $this->saveRelations($entity);
+            $entity->flushChanges();
+
+            static::addToIdentityMap($this->entityAlias . '_' . $insertId, $entity);
+            return true;
+        }
+
+        return false;
+    }
+
+    public function update(int|string $id, EntityInterface $entity): bool
+    {
+        if (!$entity->hasChanged()) {
+            $this->saveRelations($entity);
+            return true;
+        }
+
+        // For updates, we validate only the changes if cleanRules is active,
+        // allowing partial updates to pass validation seamlessly.
+        $dataToValidate = $this->cleanValidationRules ? $entity->getChanges() : $entity;
+
+        if (!$this->validate($dataToValidate)) {
+            return false;
+        }
+
+        if ($this->updatedField) {
+            $entity->setAttribute($this->updatedField, time());
+        }
+
         $changes = $entity->getChanges();
 
-        foreach ($changes as $field => $value) {
-            if ($entity->getFields()->hasRelation($field)) {
-                $relation = $entity->getFields()->getRelation($field);
-                $relation->update($entity, $value);
-            }
+        $changes = array_intersect_key($changes, $this->entityFields->getFields());
+
+        if (!empty($changes)) {
+            $this->builder()->where($this->primaryKey, $id)->update($changes);
         }
 
-        return $data;
+        $this->saveRelations($entity);
+        $entity->flushChanges();
+
+        static::addToIdentityMap($this->entityAlias . '_' . $id, $entity);
+        return true;
     }
 
-    /*
-     * Handle the relations removal
-     */
-    protected function deleteRelationsHandler(array $data): array
+    public function delete(int|string $id): bool
     {
-        if (empty($data['id']) or empty($data['purge']) or empty($this->entityAlias) or empty($this->entityFields)) {
-            return $data;
-        }
+        $builder = $this->builder()->where($this->primaryKey, $id);
 
-        $entityClass = $this->returnType;
+        $result = $this->useSoftDeletes
+            ? $builder->update([$this->deletedField => $this->formatTimestamp(time())])
+            : $builder->delete();
 
-        if (!is_subclass_of($entityClass, EntityInterface::class)) {
-            return $data;
-        }
-
-        $pivotRelations = [];
-
-        $relationKeys = $this->entityFields->getRelationKeys();
-
-        foreach ($relationKeys as $key => $field) {
-            if ($this->entityFields->getRelationType($key) === 'belongs-many') {
-                $pivotRelations[] = $this->entityFields->getRelation($key);
-            }
-        }
-
-        if (empty($pivotRelations)) {
-            return $data;
-        }
-
-        // Wipe the pivot records for each deleted ID
-        foreach ($data['id'] as $id) {
-            foreach ($pivotRelations as $relation) {
-                try {
-                    $relation->remove($id, $this->entityAlias);
-                } catch (EntityException $e) {
-                    continue;
-                }
-            }
-        }
-
-        return $data;
+        static::deleteFromIdentityMap($this->entityAlias . '_' . $id);
+        return $result;
     }
 
-    /**
-     * Prefill the data from entity cache on beforeFind event
-     *
-     * @param array $data
-     *
-     * @return array
-     */
-    protected function beforeFindHandler(array $data): array
+    public function attach(string $pivotTable, string $localKey, string $foreignKey, int|string $localId, array $relatedIds): void
     {
-        if (empty($data['id'])) {
-            return $data;
+        if (empty($relatedIds)) {
+            return;
         }
 
-        if (is_array($data['id'])) {
-            $ids = $data['id'];
-        } else {
-            $ids = [$data['id']];
-        }
+        $insertData = [];
 
-        $records = [];
-
-        foreach ($ids as $id) {
-            if (is_int($id) or is_string($id)) {
-                $key = $this->table . '_' . $id;
-                if (isset(static::$entityCache[$key])) {
-                    $records[$id] = static::$entityCache[$key];
-                } else {
-                    return $data;
-                }
-            }
-        }
-
-        if (empty($records)) {
-            return $data;
-        }
-
-        $data['returnData'] = true;
-
-        if ($this->tempReturnType === 'array') {
-            $data['data'] = $records;
-        } else {
-            foreach ($records as $key => $row) {
-                $data['data'][$key] = $this->convertToReturnType($row, $this->tempReturnType);
-            }
-        }
-
-        return $data;
-    }
-
-    /**
-     * Fill the entry cache with fresh data
-     *
-     * @param array $data
-     *
-     * @return array
-     */
-    protected function afterFindHandler(array $data): array
-    {
-        if (empty($data['data']) or !is_array($data['data'])) {
-            return $data;
-        }
-
-        if (empty($data['singleton'])) {
-            $rows = $data['data'];
-        } elseif (isset($data['data'][$this->primaryKey])) {
-            $rows = [
-                $data['data'][$this->primaryKey] => $data['data']
+        // Clean, readable loop instead of array_map with fn()
+        foreach ($relatedIds as $id) {
+            $insertData[] = [
+                $localKey   => $localId,
+                $foreignKey => $id
             ];
-        } else {
-            return $data;
         }
 
-        $first = reset($rows);
+        // Uses a dedicated builder directly from the DB so we don't pollute the model's primary table builder
+        $this->db->table($pivotTable)->ignore(true)->insertBatch($insertData);
+    }
 
-        if (is_array($first) and !empty($first[$this->primaryKey])) {
-            foreach ($rows as $id => $row) {
-                static::$entityCache[$this->table . '_' . $id] = $row;
+    public function detach(string $pivotTable, string $localKey, string $foreignKey, int|string $localId, ?array $relatedIds = null): void
+    {
+        $query = $this->db->table($pivotTable)->where($localKey, $localId);
+
+        if ($relatedIds !== null) {
+            if (empty($relatedIds)) {
+                return;
             }
-        } elseif ($first instanceof EntityInterface) {
-            foreach ($rows as $id => $row) {
-                static::$entityCache[$this->table . '_' . $id] = $row->getAttributes();
-            }
-        } elseif ($first instanceof \CodeIgniter\Entity\Entity) {
-            foreach ($rows as $id => $row) {
-                static::$entityCache[$this->table . '_' . $id] = $row->toRawArray(false, false);
-            }
+
+            $query->whereIn($foreignKey, $relatedIds);
         }
 
-        return $data;
+        $query->delete();
+    }
+
+    public function sync(string $pivotTable, string $localKey, string $foreignKey, int|string $localId, array $relatedIds): void
+    {
+        $currentRecords = $this->db->table($pivotTable)
+            ->select($foreignKey)
+            ->where($localKey, $localId)
+            ->get()->getResultArray();
+
+        $currentIds = array_column($currentRecords, $foreignKey);
+
+        $idsToAttach = array_diff($relatedIds, $currentIds);
+        $idsToDetach = array_diff($currentIds, $relatedIds);
+
+        $this->detach($pivotTable, $localKey, $foreignKey, $localId, $idsToDetach);
+        $this->attach($pivotTable, $localKey, $foreignKey, $localId, $idsToAttach);
+    }
+
+    public function getTable(): string
+    {
+        return $this->table;
+    }
+
+    public function getPrimaryKey(): string
+    {
+        return $this->primaryKey;
+    }
+
+    public function hydrateRow(array $row): EntityInterface
+    {
+        $entityId = $row[$this->primaryKey] ?? null;
+        $cacheKey = $this->entityAlias . '_' . $entityId;
+
+        if (isset(static::$identityMap[$cacheKey])) {
+            return static::getFromIdentityMap($cacheKey);
+        }
+
+        $entity = new $this->entityClass($row, $this->entityAlias, $this->entityFields);
+
+        if (!empty($entityId)) {
+            static::addToIdentityMap($cacheKey, $entity);
+        }
+
+        return $entity;
     }
 
     /**
-     * Update the entry cache on adding or updating an entry
-     *
-     * @param array $data
-     *
-     * @return array
+     * Set the value of the $skipValidation flag.
      */
-    protected function updateCacheHandler(array $data): array
+    public function skipValidation(bool $skip = true): self
     {
-        if (empty($data['result']) or empty($data['data']) or !is_array($data['data'])) {
-            return $data;
-        }
-
-        /**
-         * Singular inserts include the ID property as a string or as a number,
-         * singular updates include the array of IDs
-         */
-        if (!empty($data['id'])) {
-
-            $row = $data['data'];
-
-            /**
-             * Process the regular inserts
-             */
-            if (is_int($data['id']) or is_string($data['id'])) {
-                $row[$this->primaryKey] = $data['id'];
-
-                static::$entityCache[$this->table . '_' . $data['id']] = $row;
-                return $data;
-            }
-
-            if (is_array($data['id'])) {
-                foreach ($data['id'] as $id) {
-                    $key = $this->table . '_' . $id;
-                    if (isset(static::$entityCache[$key])) {
-                        static::$entityCache[$key] = array_merge(static::$entityCache[$key], $row);
-                    }
-                }
-            }
-
-            return $data;
-        }
-
-        /**
-         * Process batch updates. The Entry ID is a key of the array
-         */
-        foreach ($data['data'] as $row) {
-
-            if (empty($row[$this->primaryKey])) {
-                continue;
-            }
-
-            $id  = $row[$this->primaryKey];
-            $key = $this->table . '_' . $id;
-
-            if (isset(static::$entityCache[$key])) {
-                static::$entityCache[$key] = array_merge(static::$entityCache[$key], $row);
-            }
-        }
-
-        return $data;
+        $this->skipValidation = $skip;
+        return $this;
     }
 
     /**
-     * Delete cached entries from cache
-     *
-     * @param array $data
-     *
-     * @return array
+     * Should validation rules be removed for fields that aren't present?
      */
-    protected function deleteCacheHandler(array $data): array
+    public function cleanRules(bool $choice = true): self
     {
-        if (!empty($data['id']) and is_array($data['id'])) {
-            foreach ($data['id'] as $id) {
-                unset(static::$entityCache[$this->table . '_' . $id]);
+        $this->cleanValidationRules = $choice;
+        return $this;
+    }
+
+    /**
+     * Get the validation errors from the last failed save.
+     */
+    public function errors(): array
+    {
+        return $this->validationErrors;
+    }
+
+    /**
+     * Validate the Entity or raw data array against the parsed rules.
+     */
+    public function validate(EntityInterface|array $data): bool
+    {
+        if ($this->skipValidation || empty($this->validationRules)) {
+            return true;
+        }
+
+        $row = $data instanceof EntityInterface ? $data->getAttributes() : $data;
+
+        $rules = $this->cleanValidationRules
+            ? $this->cleanValidationRules($this->validationRules, $row)
+            : $this->validationRules;
+
+        // If no data existed that needs validation, we're good to go.
+        if (empty($rules)) {
+            return true;
+        }
+
+        $this->validator->reset()->setRules($rules);
+
+        if (!$this->validator->run($row)) {
+            $this->validationErrors = $this->validator->getErrors();
+            return false;
+        }
+
+        $this->validationErrors = [];
+        return true;
+    }
+
+    /**
+     * Removes any rules that apply to fields that have not been set
+     * so that rules don't block updating when doing a partial update.
+     */
+    protected function cleanValidationRules(array $rules, array $row): array
+    {
+        if (empty($row)) {
+            return [];
+        }
+
+        foreach (array_keys($rules) as $field) {
+            if (!array_key_exists($field, $row)) {
+                unset($rules[$field]);
             }
         }
 
-        return $data;
+        return $rules;
     }
 
     /**
-     * Convert a database row to an array or object
-     *
-     * @param array<string, mixed> $row Raw data from database
-     * @param 'array'|'object'|class-string $returnType
-     *
-     * @return array|object
+     * Format a Unix timestamp using the model's configured date format.
+     * Mirrors the same conversion the entity cast applies in insert() and update().
      */
-    protected function convertToReturnType(array $row, string $returnType): array|object
+    protected function formatTimestamp(int $time): int|string
     {
-        if ($returnType === $this->returnType) {
-            return new $returnType($row, $this->entityAlias);
-        }
-
-        if ($returnType === 'array') {
-            return $row;
-        }
-
-        if ($returnType === 'object') {
-            return (object) $row;
-        }
-
-        return parent::convertToReturnType($row, $returnType);
+        return match ($this->dateFormat) {
+            'datetime' => date('Y-m-d H:i:s', $time),
+            'date' => date('Y-m-d', $time),
+            default => $time,
+        };
     }
 
-    /**
-     * Convert an array or an object to a database row
-     *
-     * @param array|object $row
-     * @param 'insert'|'update' $type
-     *
-     * @return array<string, mixed>
-     *
-     * @throws ReflectionException
-     * @throws DataException
-     */
-    protected function transformDataToArray($row, string $type): array
+    protected function loadRelations(array $entities): void
     {
-        if (!in_array($type, ['insert', 'update'], true)) {
-            throw new InvalidArgumentException(
-                sprintf('Invalid type "%s" used upon transforming data to array.', $type)
-            );
+        $relations = $this->withRelations;
+
+        $this->withRelations = [];
+
+        if (empty($relations) or empty($entities)) {
+            return;
         }
 
-        if (!$this->allowEmptyInserts and empty($row)) {
-            throw DataException::forEmptyDataset($type);
-        }
+        foreach ($relations as $relationName) {
+            $relation = $this->entityFields->getRelation($relationName);
 
-        if ($this->skipValidation === false and $this->cleanValidationRules === false) {
-            $onlyChanged = false;
-        } else {
-            $onlyChanged = ($type === 'update' and $this->updateOnlyChanged);
+            if ($relation) {
+                $relation->eagerLoad($entities);
+            }
         }
+    }
 
-        if (is_object($row) and method_exists($row, 'toRawArray')) {
-            $row = $row->toRawArray($onlyChanged, false);
-        } elseif (is_object($row)) {
-            $row = $this->objectToArray($row, $onlyChanged);
+    protected function saveRelations(EntityInterface $entity): void
+    {
+        $relations = $this->entityFields->getRelationKeys();
+        $changes   = $entity->getChanges();
+
+        $changedRelations = array_intersect_key($changes, array_flip($relations));
+
+        foreach ($changedRelations as $field => $value) {
+            $this->entityFields->getRelation($field)->update($entity, $value);
         }
-
-        if (!empty($this->allowedFields)) {
-            $safeFields   = $this->allowedFields;
-            $safeFields[] = $this->primaryKey;
-            $row          = array_intersect_key($row, array_flip($safeFields));
-        }
-
-        if (!$this->allowEmptyInserts and empty($row)) {
-            throw DataException::forEmptyDataset($type);
-        }
-
-        return $row;
     }
 }

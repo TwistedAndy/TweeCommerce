@@ -4,6 +4,7 @@ namespace Config;
 
 use CodeIgniter\Config\BaseConfig;
 use \App\Core\Entity\EntityInterface;
+use CodeIgniter\Database\BaseBuilder;
 
 class Entities extends BaseConfig
 {
@@ -18,7 +19,7 @@ class Entities extends BaseConfig
             'table'    => 'posts',
             'db_group' => '',
             'pivots'   => [
-                // '\App\Entities\TagEntity::class' => 'post_tags'
+                // 'tags' => 'post_tags'
             ]
         ],
     ];

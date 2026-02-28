@@ -75,9 +75,4 @@ interface EntityInterface
      * Get Entity Alias
      */
     public function getAlias(): string;
-
-    /**
-     * Return current attributes with entities converted to arrays
-     */
-    public function toRawArray(bool $onlyChanged = false, bool $recursive = false): array;
 }

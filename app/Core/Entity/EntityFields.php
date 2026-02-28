@@ -11,21 +11,37 @@ use DateTimeInterface;
  * Read-only configuration object for an Entity class.
  * Holds cached reflection data, services, and field definitions.
  */
-class EntityFields
-{
+class EntityFields {
+
     protected Container $container;
+
     protected Sanitizer $sanitizer;
 
-    protected string $primaryKey   = '';
-    protected array  $relationData = [];
-    protected array  $relations    = [];
-    protected array  $fields       = [];
-    protected array  $defaults     = [];
-    protected array  $nullable     = [];
-    protected array  $casts        = [];
-    protected array  $castParams   = [];
-    protected array  $castHandlers = [];
-    protected array  $dateFormats  = [];
+    protected string $primaryKey = '';
+
+    protected string $createdKey = '';
+
+    protected string $updatedKey = '';
+
+    protected string $deletedKey = '';
+
+    protected array $relationData = [];
+
+    protected array $relations = [];
+
+    protected array $fields = [];
+
+    protected array $defaults = [];
+
+    protected array $nullable = [];
+
+    protected array $casts = [];
+
+    protected array $castParams = [];
+
+    protected array $castHandlers = [];
+
+    protected array $dateFormats = [];
 
     protected const DATE_FORMATS = [
         'time'        => 'H:i:s',
@@ -64,12 +80,15 @@ class EntityFields
      *     local_key?:   string,
      *     foreign_key?: string,
      *   },
-     * }> $fields
+     * }>               $fields
      * @param Container $container
      * @param Sanitizer $sanitizer
      */
     public function __construct(array $fields, Container $container, Sanitizer $sanitizer)
     {
+        $this->container = $container;
+        $this->sanitizer = $sanitizer;
+
         foreach ($fields as $key => $field) {
             $this->addField($key, $field);
         }
@@ -77,9 +96,6 @@ class EntityFields
         if (empty($this->primaryKey)) {
             throw new EntityException('No primary key is specified for an entity');
         }
-
-        $this->container = $container;
-        $this->sanitizer = $sanitizer;
 
         foreach ($this->fields as $key => $field) {
             if ($field['type'] === 'relation') {
@@ -152,22 +168,22 @@ class EntityFields
         }
 
         if (str_starts_with($cast, '\\')) {
-            if (!class_exists($cast) or !is_subclass_of($cast, CastInterface::class)) {
-                throw new EntityException("A provided cast handler '$cast' should implement the CastInterface interface");
-            }
-
             if (str_contains($cast, '[') and preg_match('/\A(.+)\[(.+)]\z/', $cast, $matches)) {
-                $cast   = $matches[1];
+                $cast = $matches[1];
                 $params = array_map('trim', explode(',', $matches[2]));
             } else {
                 $params = [];
+            }
+
+            if (!class_exists($cast) or !is_subclass_of($cast, CastInterface::class)) {
+                throw new EntityException("A provided cast handler '$cast' should implement the CastInterface interface");
             }
 
             if ($isNullable) {
                 $params[] = 'nullable';
             }
 
-            $this->castParams[$key]   = $params;
+            $this->castParams[$key] = $params;
             $this->castHandlers[$key] = $cast;
         }
 
@@ -183,6 +199,18 @@ class EntityFields
             $field['label'] = ucwords(str_replace('_', ' ', $key));
         } else {
             $field['label'] = (string) $field['label'];
+        }
+
+        if (!empty($field['subtype'])) {
+            $subtype = $field['subtype'];
+
+            if ($subtype === 'created') {
+                $this->createdKey = $key;
+            } elseif ($subtype === 'updated') {
+                $this->updatedKey = $key;
+            } elseif ($subtype === 'deleted') {
+                $this->deletedKey = $key;
+            }
         }
 
         if (!empty($field['rules'])) {
@@ -226,7 +254,14 @@ class EntityFields
      *   related:      string,
      *   local_key?:   string,
      *   foreign_key?: string,
-     * } $relation
+     *   constraint?:  array{
+     *     limit?:    int,
+     *     offset?:   int,
+     *     where?:    array,
+     *     orderby?:  array,
+     *     callback?: callable|string|null
+     *   },
+     * }             $relation
      */
     public function addRelation(string $key, array $relation): void
     {
@@ -234,7 +269,7 @@ class EntityFields
             throw new EntityException("A relation key '{$key}' is already defined");
         }
 
-        if (empty($relation['related']) or is_string($relation['related'])) {
+        if (empty($relation['related']) or !is_string($relation['related'])) {
             throw new EntityException('A related alias is not specified for the "' . $key . '" relation.');
         }
 
@@ -254,11 +289,18 @@ class EntityFields
             $relation['foreign_key'] = '';
         }
 
+        if (isset($relation['constraint']['callback']) and $relation['constraint']['callback'] instanceof \Closure) {
+            throw new EntityException("The condition callback for relation '{$key}' cannot be a Closure. Please use a serializable callable (e.g., string or array).");
+        }
+
         $this->relationData[$key] = [
-            'type'        => $relation['type'],
-            'related'     => $relation['related'],
-            'local_key'   => $relation['local_key'],
-            'foreign_key' => $relation['foreign_key'],
+            'type'              => $relation['type'],
+            'related'           => $relation['related'],
+            'local_key'         => $relation['local_key'],
+            'foreign_key'       => $relation['foreign_key'],
+            'pivot_local_key'   => $relation['pivot_local_key'] ?? null,
+            'pivot_foreign_key' => $relation['pivot_foreign_key'] ?? null,
+            'constraint'        => $relation['constraint'] ?? [],
         ];
     }
 
@@ -270,10 +312,33 @@ class EntityFields
         return isset($this->relationData[$key]);
     }
 
+    public function getCreatedKey(): string
+    {
+        return $this->createdKey;
+    }
+
+    public function getUpdatedKey(): string
+    {
+        return $this->updatedKey;
+    }
+
+    public function getDeletedKey(): string
+    {
+        return $this->deletedKey;
+    }
+
+    /**
+     * Get a date format for a field
+     */
+    public function getDateFormat(string $key): string | null
+    {
+        return $this->dateFormats[$key] ?? null;
+    }
+
     /**
      * Get a relation object
      */
-    public function getRelation(string $key): EntityRelation|null
+    public function getRelation(string $key): EntityRelation | null
     {
         if (isset($this->relations[$key])) {
             return $this->relations[$key];
@@ -283,7 +348,8 @@ class EntityFields
             return null;
         }
 
-        $relation = Container::getInstance()->make(EntityRelation::class, [
+        $relation = $this->container->make(EntityRelation::class, [
+            'name'     => $key,
             'relation' => $this->relationData[$key]
         ]);
 
@@ -319,7 +385,7 @@ class EntityFields
     /**
      * Get a field array
      */
-    public function getField(string $key): array|null
+    public function getField(string $key): array | null
     {
         return $this->fields[$key] ?? null;
     }
@@ -433,7 +499,7 @@ class EntityFields
                 }
 
                 $first = $trimmed[0];
-                $last  = substr($trimmed, -1);
+                $last = substr($trimmed, -1);
 
                 if (($first === '{' and $last === '}') or ($first === '[' and $last === ']') or ($first === '"' and $last === '"')) {
                     json_decode($trimmed);
@@ -448,6 +514,7 @@ class EntityFields
                 if (!is_string($value) or !$this->isSerialized($value)) {
                     return serialize($value);
                 }
+
                 return $value;
             case 'datetime':
             case 'datetime-ms':
@@ -472,7 +539,7 @@ class EntityFields
             default:
                 if (isset($this->castHandlers[$field])) {
                     $handler = $this->castHandlers[$field];
-                    $value   = $handler::set($value, $this->castParams[$field]);
+                    $value = $handler::set($value, $this->castParams[$field]);
                 }
         }
 
@@ -554,7 +621,7 @@ class EntityFields
             default:
                 if (isset($this->castHandlers[$field])) {
                     $handler = $this->castHandlers[$field];
-                    $value   = $handler::get($value, $this->castParams[$field]);
+                    $value = $handler::get($value, $this->castParams[$field]);
                 }
         }
 
@@ -564,7 +631,7 @@ class EntityFields
     /**
      * Get a default field value in the storage format
      */
-    public function getCastDefault(string $cast): string|int
+    public function getCastDefault(string $cast): string | int
     {
         return match ($cast) {
             'int', 'bool', 'float', 'timestamp' => 0,

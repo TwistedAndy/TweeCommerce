@@ -63,119 +63,30 @@ class EntityRegistry
      *
      * @return string|null
      */
-    public function getDatabaseGroup(string $alias): string|null
-    {
-        return $this->config[$alias] ?? $this->config[$alias]['db_group'] ?? null;
-    }
+	public function getDatabaseGroup(string $alias): ?string
+	{
+		return $this->config[$alias]['databaseGroup'] ?? null;
+	}
 
     /**
      * Get the Entity Model object
      */
-    public function getModel(string $alias): EntityModel
+    public function getModel(string $alias, bool $getShared = true): EntityModel
     {
-        if (!empty($this->models[$alias])) {
+        if ($getShared and !empty($this->models[$alias])) {
             return $this->models[$alias];
         }
 
         $config = $this->getConfig($alias);
 
-        $params = [];
+        $model = $this->container->make($config['model'], [
+            'alias'    => $alias,
+            'registry' => $this
+        ], static::class);
 
-        if (!empty($config['db_group'])) {
-            $params['db'] = Database::connect($config['db_group']);
+        if ($getShared) {
+            $this->models[$alias] = $model;
         }
-
-        /**
-         * @var EntityModel $model
-         */
-        $model = $this->container->make($config['model'], $params, static::class);
-
-        $entityClass  = $this->getEntityClass($alias);
-        $entityFields = $this->getEntityFields($alias);
-        $fields       = $entityFields->getFields();
-
-        $validationRules = [];
-
-        $allowedFields = [];
-
-        $primaryKey = $entityFields->getPrimaryKey();
-
-        foreach ($fields as $key => $field) {
-
-            if ($key != $primaryKey and !$entityFields->hasRelation($key)) {
-                $allowedFields[] = $key;
-            }
-
-            if (empty($field['rules']) or !is_array($field['rules']) or empty($field['rules']['rules'])) {
-                continue;
-            }
-
-            $rule = [];
-
-            if (!empty($field['label'])) {
-                $rule['label'] = $field['label'];
-            }
-
-            $rules = $field['rules']['rules'];
-
-            if (is_string($rules)) {
-                $rules = str_replace('{table}', $config['table'], $rules);
-            } elseif (is_array($rules)) {
-                $rules = array_map(function ($string) use ($config) {
-                    return str_replace('{table}', $config['table'], $string);
-                }, $rules);
-            }
-
-            $rule['rules'] = $rules;
-
-            if (!empty($field['rules']['errors'])) {
-                $rule['errors'] = $field['rules']['errors'];
-            }
-
-            $validationRules[$key] = $rule;
-        }
-
-        $useTimestamps = (!empty($fields['created_at']) or !empty($fields['updated_at']));
-
-        $modelConfig = [
-            'table'           => $config['table'],
-            'primaryKey'      => $primaryKey,
-            'returnType'      => $entityClass,
-            'entityAlias'     => $alias,
-            'entityFields'    => $entityFields,
-            'useSoftDeletes'  => array_key_exists('deleted_at', $fields),
-            'validationRules' => $validationRules,
-            'allowedFields'   => $allowedFields,
-        ];
-
-        $dateFields = [
-            'created_at' => 'createdField',
-            'updated_at' => 'updatedField',
-            'deleted_at' => 'deletedField'
-        ];
-
-        foreach ($dateFields as $key => $field) {
-            if (empty($fields[$key])) {
-                $modelConfig[$field] = '';
-            } else {
-                $modelConfig[$field] = $key;
-            }
-        }
-
-        if (!empty($fields['created_at']) and str_contains($fields['created_at']['type'], 'datetime')) {
-            $dateFormat = 'datetime';
-        } elseif (!empty($fields['updated_at']) and str_contains($fields['updated_at']['type'], 'datetime')) {
-            $dateFormat = 'datetime';
-        } else {
-            $dateFormat = 'int';
-        }
-
-        $modelConfig['dateFormat']    = $dateFormat;
-        $modelConfig['useTimestamps'] = $useTimestamps;
-
-        $model->configure($modelConfig);
-
-        $this->models[$alias] = $model;
 
         return $model;
     }

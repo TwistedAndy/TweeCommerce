@@ -91,11 +91,13 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
     {
         $class = static::class;
 
-        static::$entityFields[$class]  = [];
-        static::$entityAliases[$class] = [];
-        static::$entityMethods[$class] = [];
-        static::$entityGetters[$class] = [];
-        static::$entitySetters[$class] = [];
+        unset(
+            static::$entityFields[$class],
+            static::$entityAliases[$class],
+            static::$entityMethods[$class],
+            static::$entityGetters[$class],
+            static::$entitySetters[$class],
+        );
     }
 
     /**
@@ -121,18 +123,42 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
                     ],
                 ],
             ],
+            'tags'       => [
+                'type'     => 'relation',
+                'relation' => [
+                    'type'       => 'has-many',
+                    'related'    => 'comment',
+                    'constraint' => [
+                        'where'   => ['status' => 'approved', 'deleted_at' => null],
+                        'orderBy' => ['created_at', 'DESC'],
+                        'limit'   => 50,
+                        'offset'  => 0,
+                        /*
+                         * Supported callback formats:
+                         * - Local Model Method (String)
+                         * - Static Class Callable (Array)
+                         * - Static Class Callable (String)
+                         * - Global Function (String)
+                         */
+                        'callback' => null
+                    ]
+                ],
+            ],
             'created_at' => [
                 'default' => 0,
                 'type'    => 'timestamp',
                 'rules'   => 'required',
+                'subtype' => 'created',
             ],
             'updated_at' => [
                 'default' => null,
                 'type'    => '?timestamp',
+                'subtype' => 'updated',
             ],
             'deleted_at' => [
                 'default' => null,
                 'type'    => '?timestamp',
+                'subtype' => 'deleted',
             ]
         ];
     }
@@ -177,7 +203,7 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             static::initEntity();
         }
 
-        if ($fields === null) {
+        if ($fields === null or $fields === static::$entityFields[$class]) {
             $this->fields = static::$entityFields[$class];
         } else {
             $this->fields = $fields;
@@ -427,35 +453,6 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
     }
 
     /**
-     * Return current attributes with entities converted to arrays
-     */
-    public function toRawArray(bool $onlyChanged = false, bool $recursive = false): array
-    {
-        if ($onlyChanged) {
-            $attributes = $this->getChanges();
-        } else {
-            $attributes = $this->getAttributes() + $this->fields->getDefaultValues();
-        }
-
-        if ($recursive) {
-            // Remove 'static' here
-            $map = function ($value) use (&$map, $onlyChanged, $recursive) {
-                if (is_object($value) && is_callable([$value, 'toRawArray'])) {
-                    return $value->toRawArray($onlyChanged, $recursive);
-                }
-                if (is_array($value)) {
-                    return array_map($map, $value);
-                }
-                return $value;
-            };
-
-            return array_map($map, $attributes);
-        }
-
-        return $attributes;
-    }
-
-    /**
      * Allow an object to be serialized with json_encode()
      *
      * @return array
@@ -478,7 +475,7 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
     }
 
     /**
-     * ArrayAccess: Allow accessing entity propertines like an array
+     * ArrayAccess: Allow accessing entity properties like an array
      */
     public function offsetExists(mixed $offset): bool
     {
