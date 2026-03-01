@@ -255,6 +255,7 @@ class EntityFields
      *   related:      string,
      *   local_key?:   string,
      *   foreign_key?: string,
+     *   cascade?:     bool,
      *   constraint?:  array{
      *     limit?:    int,
      *     offset?:   int,
@@ -312,6 +313,7 @@ class EntityFields
             'pivot_local_key'   => $relation['pivot_local_key'] ?? null,
             'pivot_foreign_key' => $relation['pivot_foreign_key'] ?? null,
             'constraint'        => $relation['constraint'] ?? [],
+            'cascade'           => (bool) ($relation['cascade'] ?? false),
         ];
     }
 

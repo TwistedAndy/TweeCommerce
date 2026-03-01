@@ -500,21 +500,74 @@ class EntityModel
         return true;
     }
 
-    public function delete(int|string $id): bool
+    /**
+     * Delete one or more records.
+     *
+     * Pass an array to delete in bulk (one query). Pass $purge = true to hard-delete
+     * even when the model uses soft-deletes. Cascades to relations with cascade => true.
+     */
+    public function delete(int|string|array $ids, bool $purge = false): bool
     {
+        if (is_string($ids) or is_int($ids)) {
+            $ids = [$ids];
+        }
+
+        if (empty($ids)) {
+            return true;
+        }
+
+        $this->runCascadeDelete($ids, $purge or !$this->useSoftDeletes);
+
         $builder = $this->builder();
 
         $this->withDeleted();
 
-        $builder->where($this->primaryKey, $id);
+        $builder->whereIn($this->primaryKey, $ids);
 
-        $result = $this->useSoftDeletes
+        $result = (!$purge and $this->useSoftDeletes)
             ? $builder->update([$this->deletedField => $this->formatTimestamp(time())])
             : $builder->delete();
 
         $this->newQuery();
 
-        static::deleteFromIdentityMap($this->entityAlias . '_' . $id);
+        foreach ($ids as $singleId) {
+            static::deleteFromIdentityMap($this->entityAlias . '_' . $singleId);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Restore one or more soft-deleted records.
+     *
+     * Cascades to relations with cascade => true, restoring their soft-deleted
+     * children recursively before un-deleting the parent rows.
+     */
+    public function restore(int|string|array $ids): bool
+    {
+        if (is_string($ids) or is_int($ids)) {
+            $ids = [$ids];
+        }
+
+        if (empty($ids) or !$this->useSoftDeletes) {
+            return true;
+        }
+
+        $this->runCascadeRestore($ids);
+
+        $builder = $this->builder();
+
+        $this->withDeleted();
+
+        $builder->whereIn($this->primaryKey, $ids);
+        $result = $builder->update([$this->deletedField => null]);
+
+        $this->newQuery();
+
+        foreach ($ids as $singleId) {
+            static::deleteFromIdentityMap($this->entityAlias . '_' . $singleId);
+        }
+
         return $result;
     }
 
@@ -538,11 +591,17 @@ class EntityModel
         $this->db->table($pivotTable)->ignore(true)->insertBatch($insertData);
     }
 
-    public function detach(string $pivotTable, string $localKey, string $foreignKey, int|string $localId, ?array $relatedIds = null): void
+    public function detach(string $pivotTable, string $localKey, string $foreignKey, int|string|array $localId, ?array $relatedIds = null): void
     {
-        $query = $this->db->table($pivotTable)->where($localKey, $localId);
+        if (empty($localId)) {
+            return;
+        }
 
-        if ($relatedIds !== null) {
+        $query = is_array($localId)
+            ? $this->db->table($pivotTable)->whereIn($localKey, $localId)
+            : $this->db->table($pivotTable)->where($localKey, $localId);
+
+        if (!is_array($localId) && $relatedIds !== null) {
             if (empty($relatedIds)) {
                 return;
             }
@@ -733,6 +792,34 @@ class EntityModel
 
             if ($relation) {
                 $relation->eagerLoad($entities);
+            }
+        }
+    }
+
+    /**
+     * Run cascade delete/soft-delete for all relations that have cascade => true.
+     */
+    protected function runCascadeDelete(array $ids, bool $purge): void
+    {
+        foreach ($this->entityFields->getRelationKeys() as $key) {
+            $relation = $this->entityFields->getRelation($key);
+
+            if ($relation !== null and $relation->isCascade()) {
+                $relation->cascadeDelete($ids, $this->entityAlias, $purge);
+            }
+        }
+    }
+
+    /**
+     * Run cascade restore for all relations that have cascade => true.
+     */
+    protected function runCascadeRestore(array $ids): void
+    {
+        foreach ($this->entityFields->getRelationKeys() as $key) {
+            $relation = $this->entityFields->getRelation($key);
+
+            if ($relation !== null and $relation->isCascade()) {
+                $relation->cascadeRestore($ids);
             }
         }
     }

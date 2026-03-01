@@ -21,6 +21,7 @@ class EntityRelation
     protected string $pivotForeignKey = '';
     protected string $relationName    = '';
     protected array  $constraint      = [];
+    protected bool   $cascade         = false;
 
     public function __construct(string $name, array $relation, EntityRegistry $registry)
     {
@@ -35,6 +36,7 @@ class EntityRelation
         $this->foreignKey   = $relation['foreign_key'] ?? throw new EntityException('Foreign key is not specified');
         $this->relationName = $name;
         $this->constraint   = $relation['constraint'] ?? [];
+        $this->cascade      = (bool) ($relation['cascade'] ?? false);
 
         $this->relatedAlias = $relation['related'];
         $this->relatedClass = $registry->getEntityClass($relation['related']);
@@ -145,6 +147,85 @@ class EntityRelation
         return $this->isMultiple ? $this->resolveMany($value) : $this->resolveOne($value);
     }
 
+    public function isCascade(): bool
+    {
+        return $this->cascade;
+    }
+
+    /**
+     * Cascade a delete operation to one or more parent entity IDs.
+     *
+     * For has-one / has-many: one query fetches all related IDs, then delete() runs
+     *   the bulk operation (and their own cascades) recursively.
+     * For belongs-many: remove pivot records in one DELETE … WHERE IN on hard-delete only,
+     *   so soft-deleted parents can be fully restored including their many-to-many relationships.
+     * For belongs-one: no-op (parent holds the FK; the referenced entity is not owned).
+     *
+     * @param bool $purge true = hard-delete, false = soft-delete (if the related model supports it)
+     */
+    public function cascadeDelete(array $localIds, string $localAlias, bool $purge): void
+    {
+        if (empty($localIds) or $this->type === 'belongs-one') {
+            return;
+        }
+
+        if ($this->type === 'belongs-many') {
+            if ($purge) {
+                $pivotTable = $this->registry->getPivotTable($localAlias, $this->relatedAlias);
+
+                if (!empty($pivotTable)) {
+                    $this->relatedModel->detach($pivotTable, $this->pivotLocalKey, $this->pivotForeignKey, $localIds);
+                }
+            }
+
+            return;
+        }
+
+        // has-one / has-many: one query to get all related IDs across every parent,
+        // then a single bulk delete (which recursively handles their own cascades).
+        $rows = $this->relatedModel->builder()
+            ->select($this->relatedKey)
+            ->whereIn($this->foreignKey, $localIds)
+            ->get()->getResultArray();
+
+        $this->relatedModel->newQuery();
+
+        $ids = array_column($rows, $this->relatedKey);
+
+        if (!empty($ids)) {
+            $this->relatedModel->delete($ids, $purge);
+        }
+    }
+
+    /**
+     * Cascade a restore operation to one or more parent entity IDs.
+     *
+     * For has-one / has-many: one query fetches all related IDs (including soft-deleted),
+     *   then restore() runs the bulk operation recursively.
+     * For belongs-many / belongs-one: no-op — pivot records were preserved on soft-delete,
+     *   and the referenced entity is not owned by the parent.
+     */
+    public function cascadeRestore(array $localIds): void
+    {
+        if (empty($localIds) or in_array($this->type, ['belongs-one', 'belongs-many'], true)) {
+            return;
+        }
+
+        // has-one / has-many: include soft-deleted rows (raw builder bypasses maybeExcludeDeleted)
+        $rows = $this->relatedModel->builder()
+            ->select($this->relatedKey)
+            ->whereIn($this->foreignKey, $localIds)
+            ->get()->getResultArray();
+
+        $this->relatedModel->newQuery();
+
+        $ids = array_column($rows, $this->relatedKey);
+
+        if (!empty($ids)) {
+            $this->relatedModel->restore($ids);
+        }
+    }
+
     /**
      * Fill entities with the relation data
      */
@@ -233,7 +314,7 @@ class EntityRelation
         $relatedEntities = [];
         foreach ($relatedRecords as $row) {
             // Bypass find() entirely to prevent N+1 database queries.
-            $entity = $this->relatedModel->hydrateRow($row);
+            $entity            = $this->relatedModel->hydrateRow($row);
             $relatedEntities[] = $entity;
         }
 
@@ -244,7 +325,7 @@ class EntityRelation
                 continue;
             }
 
-            $matched  = [];
+            $matched = [];
 
             if ($this->type === 'belongs-one') {
                 foreach ($relatedEntities as $relatedEntity) {
