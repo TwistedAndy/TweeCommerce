@@ -64,8 +64,8 @@ class EntityRelation
      * Get a configured Model Instance proxying the Builder for this relation.
      *
      * This method modifies the internal Query Builder state of the related model.
-     * It must be immediately followed by a read operation (e.g., findAll(), first())
-     * to trigger CodeIgniter's native auto-reset mechanism.
+     * It must be immediately followed by a terminal operation (findAll(), first()),
+     * which will null the builder after executing.
      */
     public function query(EntityInterface $localEntity): EntityModel
     {
@@ -189,6 +189,8 @@ class EntityRelation
 
             $pivotRecords = $builder->get()->getResultArray();
 
+            $this->relatedModel->newQuery();
+
             $pivotMap          = [];
             $relatedIdsToFetch = [];
 
@@ -239,6 +241,8 @@ class EntityRelation
 
         $builder = $this->relatedModel->builder();
 
+        $this->relatedModel->maybeExcludeDeleted($builder);
+
         if ($this->constraint) {
             $this->applyConstraints($builder);
         }
@@ -248,6 +252,8 @@ class EntityRelation
         }
 
         $relatedRecords = $builder->whereIn($keyToMatch, $localIds)->get()->getResultArray();
+
+        $this->relatedModel->newQuery();
 
         $relatedEntities = [];
         foreach ($relatedRecords as $row) {
@@ -371,6 +377,8 @@ class EntityRelation
             ->where($this->foreignKey, $localId)
             ->update([$this->foreignKey => null]);
 
+        $this->relatedModel->newQuery();
+
         $entity = $this->resolveOne($relatedData);
 
         // Attach and save the new entity (if one was provided)
@@ -392,6 +400,7 @@ class EntityRelation
         // If empty array, detach everything and exit
         if (empty($relatedData)) {
             $this->relatedModel->builder()->where($this->foreignKey, $localId)->update([$this->foreignKey => null]);
+            $this->relatedModel->newQuery();
             return;
         }
 
@@ -416,6 +425,8 @@ class EntityRelation
         }
 
         $builder->update([$this->foreignKey => null]);
+
+        $this->relatedModel->newQuery();
     }
 
     /**

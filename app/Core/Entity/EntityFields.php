@@ -11,7 +11,8 @@ use DateTimeInterface;
  * Read-only configuration object for an Entity class.
  * Holds cached reflection data, services, and field definitions.
  */
-class EntityFields {
+class EntityFields
+{
 
     protected Container $container;
 
@@ -80,7 +81,7 @@ class EntityFields {
      *     local_key?:   string,
      *     foreign_key?: string,
      *   },
-     * }>               $fields
+     * }> $fields
      * @param Container $container
      * @param Sanitizer $sanitizer
      */
@@ -169,7 +170,7 @@ class EntityFields {
 
         if (str_starts_with($cast, '\\')) {
             if (str_contains($cast, '[') and preg_match('/\A(.+)\[(.+)]\z/', $cast, $matches)) {
-                $cast = $matches[1];
+                $cast   = $matches[1];
                 $params = array_map('trim', explode(',', $matches[2]));
             } else {
                 $params = [];
@@ -183,7 +184,7 @@ class EntityFields {
                 $params[] = 'nullable';
             }
 
-            $this->castParams[$key] = $params;
+            $this->castParams[$key]   = $params;
             $this->castHandlers[$key] = $cast;
         }
 
@@ -261,7 +262,7 @@ class EntityFields {
      *     orderby?:  array,
      *     callback?: callable|string|null
      *   },
-     * }             $relation
+     * } $relation
      */
     public function addRelation(string $key, array $relation): void
     {
@@ -330,7 +331,7 @@ class EntityFields {
     /**
      * Get a date format for a field
      */
-    public function getDateFormat(string $key): string | null
+    public function getDateFormat(string $key): string|null
     {
         return $this->dateFormats[$key] ?? null;
     }
@@ -338,7 +339,7 @@ class EntityFields {
     /**
      * Get a relation object
      */
-    public function getRelation(string $key): EntityRelation | null
+    public function getRelation(string $key): EntityRelation|null
     {
         if (isset($this->relations[$key])) {
             return $this->relations[$key];
@@ -385,7 +386,7 @@ class EntityFields {
     /**
      * Get a field array
      */
-    public function getField(string $key): array | null
+    public function getField(string $key): array|null
     {
         return $this->fields[$key] ?? null;
     }
@@ -499,7 +500,7 @@ class EntityFields {
                 }
 
                 $first = $trimmed[0];
-                $last = substr($trimmed, -1);
+                $last  = substr($trimmed, -1);
 
                 if (($first === '{' and $last === '}') or ($first === '[' and $last === ']') or ($first === '"' and $last === '"')) {
                     json_decode($trimmed);
@@ -529,17 +530,17 @@ class EntityFields {
                     $timestamp = strtotime($value);
                 }
 
-                if ($timestamp > 0) {
+                if ($timestamp !== false) {
                     return date($this->dateFormats[$field], $timestamp);
                 }
 
-                return isset($this->nullable[$field]) ? null : '';
+                return isset($this->nullable[$field]) ? null : date($this->dateFormats[$field], 0);
             case 'uri':
                 return $this->sanitizer->sanitizeUri((string) $value);
             default:
                 if (isset($this->castHandlers[$field])) {
                     $handler = $this->castHandlers[$field];
-                    $value = $handler::set($value, $this->castParams[$field]);
+                    $value   = $handler::set($value, $this->castParams[$field]);
                 }
         }
 
@@ -621,7 +622,7 @@ class EntityFields {
             default:
                 if (isset($this->castHandlers[$field])) {
                     $handler = $this->castHandlers[$field];
-                    $value = $handler::get($value, $this->castParams[$field]);
+                    $value   = $handler::get($value, $this->castParams[$field]);
                 }
         }
 
@@ -629,13 +630,16 @@ class EntityFields {
     }
 
     /**
-     * Get a default field value in the storage format
+     * Get a default field value in the storage format.
+     * Returned values are already in storage format and do not need casting.
      */
-    public function getCastDefault(string $cast): string | int
+    public function getCastDefault(string $cast): mixed
     {
         return match ($cast) {
-            'int', 'bool', 'float', 'timestamp' => 0,
-            'json', 'json-array' => ($cast === 'json-array') ? '[]' : '{}',
+            'int', 'bool', 'timestamp' => 0,
+            'float' => 0.0,
+            'json' => '{}',
+            'json-array' => '[]',
             'array' => 'a:0:{}',
             default => '',
         };

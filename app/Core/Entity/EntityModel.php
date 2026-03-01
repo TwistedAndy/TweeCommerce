@@ -4,6 +4,7 @@ namespace App\Core\Entity;
 
 use CodeIgniter\Database\BaseConnection;
 use CodeIgniter\Database\BaseBuilder;
+use CodeIgniter\Pager\PagerInterface;
 use BadMethodCallException;
 use CodeIgniter\Validation\ValidationInterface;
 
@@ -26,6 +27,7 @@ class EntityModel
     protected string         $entityAlias;
     protected EntityFields   $entityFields;
     protected EntityRegistry $registry;
+    protected PagerInterface $pager;
 
     protected string $dateFormat   = 'U';
     protected string $deletedField = 'deleted_at';
@@ -33,6 +35,7 @@ class EntityModel
     protected string $updatedField = 'updated_at';
 
     protected bool $useSoftDeletes = false;
+    protected bool $excludeDeleted = true;
     protected bool $useTimestamps  = false;
 
     protected array $withRelations = [];
@@ -109,7 +112,7 @@ class EntityModel
         static::$identityMap = [];
     }
 
-    public function __construct(string $alias, EntityRegistry $registry, ValidationInterface $validator)
+    public function __construct(string $alias, EntityRegistry $registry, ValidationInterface $validator, PagerInterface $pager)
     {
         $entityFields = $registry->getEntityFields($alias);
 
@@ -121,6 +124,7 @@ class EntityModel
         $this->entityClass  = $registry->getEntityClass($alias);
         $this->entityFields = $entityFields;
         $this->registry     = $registry;
+        $this->pager        = $pager;
 
         $this->DBGroup = $registry->getDatabaseGroup($alias);
 
@@ -215,10 +219,23 @@ class EntityModel
                 return $this;
             }
 
+            $this->builder = null;
             return $result;
         }
 
         throw new BadMethodCallException("Method {$name} does not exist on EntityModel or BaseBuilder.");
+    }
+
+    /**
+     * Explicitly discard any pending builder conditions and start a clean query.
+     * Use this when reusing a model instance across multiple independent queries.
+     */
+    public function newQuery(): self
+    {
+        $this->builder        = null;
+        $this->withRelations  = [];
+        $this->excludeDeleted = true;
+        return $this;
     }
 
     /**
@@ -271,10 +288,12 @@ class EntityModel
             return [];
         }
 
+        $builder = $this->builder();
+
         // Do not cache the relations
         if (!empty($this->withRelations)) {
             // Apply condition natively to the builder, then explicitly call the model's findAll() method
-            $this->builder()->whereIn($this->primaryKey, $ids);
+            $builder->whereIn($this->primaryKey, $ids);
             return $this->findAll();
         }
 
@@ -328,9 +347,7 @@ class EntityModel
     {
         $builder = $this->builder();
 
-        if ($this->useSoftDeletes) {
-            $builder->where($this->table . '.' . $this->deletedField, null);
-        }
+        $this->maybeExcludeDeleted($builder);
 
         $rows = $builder->get()->getResultArray();
 
@@ -340,6 +357,8 @@ class EntityModel
             $this->loadRelations($entities);
         }
 
+        $this->newQuery();
+
         return $entities;
     }
 
@@ -347,12 +366,11 @@ class EntityModel
     {
         $builder = $this->builder();
 
-        if ($this->useSoftDeletes) {
-            $builder->where($this->table . '.' . $this->deletedField, null);
-        }
+        $this->maybeExcludeDeleted($builder);
 
-        // CI4 auto-resets the builder state after get()
         $row = $builder->get()->getRowArray();
+
+        $this->builder = null;
 
         if (!$row) {
             $this->withRelations = []; // Clear eager load queue if no result
@@ -365,7 +383,30 @@ class EntityModel
             $this->loadRelations([$entity]);
         }
 
+        $this->newQuery();
+
         return $entity;
+    }
+
+    /**
+     * Paginates results using CI4's Pager library.
+     * After calling this method, access $model->pager to render pagination links.
+     *
+     * @return EntityInterface[]
+     */
+    public function paginate(int $perPage = 20, string $group = 'default', int $page = 0): array
+    {
+        $page = max(1, $page ? : (int) $this->pager->getCurrentPage($group));
+
+        // countAllResults(false) runs COUNT(*) while preserving all WHERE/JOIN conditions
+        // so the subsequent findAll() applies the same filters with limit/offset added.
+        $total = $this->builder()->countAllResults(false);
+
+        $this->pager->store($group, $page, $perPage, $total);
+
+        $this->builder()->limit($perPage, ($page - 1) * $perPage);
+
+        return $this->findAll();
     }
 
     public function save(EntityInterface $entity): bool
@@ -400,7 +441,11 @@ class EntityModel
             return false;
         }
 
-        if ($this->builder()->insert($data)) {
+        $success = $this->builder()->insert($data);
+
+        $this->newQuery();
+
+        if ($success) {
             $insertId = $this->db->insertID();
             $entity->setAttribute($this->primaryKey, $insertId);
 
@@ -438,8 +483,15 @@ class EntityModel
         $changes = array_intersect_key($changes, $this->entityFields->getFields());
 
         if (!empty($changes)) {
-            $this->builder()->where($this->primaryKey, $id)->update($changes);
+            $builder = $this->builder();
+
+            $this->withDeleted();
+
+            $builder->where($this->primaryKey, $id);
+            $builder->update($changes);
         }
+
+        $this->newQuery();
 
         $this->saveRelations($entity);
         $entity->flushChanges();
@@ -450,11 +502,17 @@ class EntityModel
 
     public function delete(int|string $id): bool
     {
-        $builder = $this->builder()->where($this->primaryKey, $id);
+        $builder = $this->builder();
+
+        $this->withDeleted();
+
+        $builder->where($this->primaryKey, $id);
 
         $result = $this->useSoftDeletes
             ? $builder->update([$this->deletedField => $this->formatTimestamp(time())])
             : $builder->delete();
+
+        $this->newQuery();
 
         static::deleteFromIdentityMap($this->entityAlias . '_' . $id);
         return $result;
@@ -519,6 +577,38 @@ class EntityModel
     public function getPrimaryKey(): string
     {
         return $this->primaryKey;
+    }
+
+    public function getPager(): PagerInterface
+    {
+        return $this->pager;
+    }
+
+    /**
+     * Get records without trashed ones
+     */
+    public function maybeExcludeDeleted(?BaseBuilder $builder = null): void
+    {
+        if ($this->useSoftDeletes and $this->excludeDeleted) {
+            if ($builder === null) {
+                $builder = $this->builder();
+            }
+
+            $builder->where($this->table . '.' . $this->deletedField, null);
+        }
+    }
+
+    public function withDeleted(): void
+    {
+        $this->excludeDeleted = false;
+    }
+
+    public function onlyDeleted(): void
+    {
+        if ($this->useSoftDeletes) {
+            $this->builder()->where($this->table . '.' . $this->deletedField . ' IS NOT NULL');
+            $this->excludeDeleted = false;
+        }
     }
 
     public function hydrateRow(array $row): EntityInterface
