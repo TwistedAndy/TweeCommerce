@@ -441,11 +441,23 @@ class EntityModel
             return false;
         }
 
-        $success = $this->builder()->insert($data);
+        $useTransaction = !empty($this->entityFields->getRelationKeys());
 
-        $this->newQuery();
+        if ($useTransaction) {
+            $this->db->transBegin();
+        }
 
-        if ($success) {
+        try {
+            $success = $this->builder()->insert($data);
+            $this->newQuery();
+
+            if (!$success) {
+                if ($useTransaction) {
+                    $this->db->transRollback();
+                }
+                return false;
+            }
+
             $insertId = $this->db->insertID();
             $entity->setAttribute($this->primaryKey, $insertId);
 
@@ -453,10 +465,18 @@ class EntityModel
             $entity->flushChanges();
 
             static::addToIdentityMap($this->entityAlias . '_' . $insertId, $entity);
-            return true;
-        }
 
-        return false;
+            if ($useTransaction) {
+                $this->db->transCommit();
+            }
+
+            return true;
+        } catch (\Throwable $e) {
+            if ($useTransaction) {
+                $this->db->transRollback();
+            }
+            throw new EntityException('Failed to insert entity: ' . $e->getMessage(), 0, $e);
+        }
     }
 
     public function update(int|string $id, EntityInterface $entity): bool
@@ -482,22 +502,40 @@ class EntityModel
 
         $changes = array_intersect_key($changes, $this->entityFields->getFields());
 
-        if (!empty($changes)) {
-            $builder = $this->builder();
+        $useTransaction = !empty($this->entityFields->getRelationKeys());
 
-            $this->withDeleted();
-
-            $builder->where($this->primaryKey, $id);
-            $builder->update($changes);
+        if ($useTransaction) {
+            $this->db->transBegin();
         }
 
-        $this->newQuery();
+        try {
+            if (!empty($changes)) {
+                $builder = $this->builder();
 
-        $this->saveRelations($entity);
-        $entity->flushChanges();
+                $this->withDeleted();
 
-        static::addToIdentityMap($this->entityAlias . '_' . $id, $entity);
-        return true;
+                $builder->where($this->primaryKey, $id);
+                $builder->update($changes);
+            }
+
+            $this->newQuery();
+
+            $this->saveRelations($entity);
+            $entity->flushChanges();
+
+            static::addToIdentityMap($this->entityAlias . '_' . $id, $entity);
+
+            if ($useTransaction) {
+                $this->db->transCommit();
+            }
+
+            return true;
+        } catch (\Throwable $e) {
+            if ($useTransaction) {
+                $this->db->transRollback();
+            }
+            throw new EntityException('Failed to update entity: ' . $e->getMessage(), 0, $e);
+        }
     }
 
     /**
@@ -516,25 +554,42 @@ class EntityModel
             return true;
         }
 
-        $this->runCascadeDelete($ids, $purge or !$this->useSoftDeletes);
+        $useTransaction = !empty($this->entityFields->getRelationKeys());
 
-        $builder = $this->builder();
-
-        $this->withDeleted();
-
-        $builder->whereIn($this->primaryKey, $ids);
-
-        $result = (!$purge and $this->useSoftDeletes)
-            ? $builder->update([$this->deletedField => $this->formatTimestamp(time())])
-            : $builder->delete();
-
-        $this->newQuery();
-
-        foreach ($ids as $singleId) {
-            static::deleteFromIdentityMap($this->entityAlias . '_' . $singleId);
+        if ($useTransaction) {
+            $this->db->transBegin();
         }
 
-        return $result;
+        try {
+            $this->runCascadeDelete($ids, $purge or !$this->useSoftDeletes);
+
+            $builder = $this->builder();
+
+            $this->withDeleted();
+
+            $builder->whereIn($this->primaryKey, $ids);
+
+            $result = (!$purge and $this->useSoftDeletes)
+                ? $builder->update([$this->deletedField => $this->formatTimestamp(time())])
+                : $builder->delete();
+
+            $this->newQuery();
+
+            foreach ($ids as $singleId) {
+                static::deleteFromIdentityMap($this->entityAlias . '_' . $singleId);
+            }
+
+            if ($useTransaction) {
+                $this->db->transCommit();
+            }
+
+            return $result;
+        } catch (\Throwable $e) {
+            if ($useTransaction) {
+                $this->db->transRollback();
+            }
+            throw new EntityException('Failed to delete entity: ' . $e->getMessage(), 0, $e);
+        }
     }
 
     /**
@@ -553,22 +608,40 @@ class EntityModel
             return true;
         }
 
-        $this->runCascadeRestore($ids);
+        $useTransaction = !empty($this->entityFields->getRelationKeys());
 
-        $builder = $this->builder();
-
-        $this->withDeleted();
-
-        $builder->whereIn($this->primaryKey, $ids);
-        $result = $builder->update([$this->deletedField => null]);
-
-        $this->newQuery();
-
-        foreach ($ids as $singleId) {
-            static::deleteFromIdentityMap($this->entityAlias . '_' . $singleId);
+        if ($useTransaction) {
+            $this->db->transBegin();
         }
 
-        return $result;
+        try {
+            $this->runCascadeRestore($ids);
+
+            $builder = $this->builder();
+
+            $this->withDeleted();
+
+            $builder->whereIn($this->primaryKey, $ids);
+            $result = $builder->update([$this->deletedField => null]);
+
+            $this->newQuery();
+
+            foreach ($ids as $singleId) {
+                static::deleteFromIdentityMap($this->entityAlias . '_' . $singleId);
+            }
+
+            if ($useTransaction) {
+                $this->db->transCommit();
+            }
+
+            return $result;
+        } catch (\Throwable $e) {
+            if ($useTransaction) {
+                $this->db->transRollback();
+            }
+
+            throw new EntityException('Failed to restore entity: ' . $e->getMessage(), 0, $e);
+        }
     }
 
     public function attach(string $pivotTable, string $localKey, string $foreignKey, int|string $localId, array $relatedIds): void
