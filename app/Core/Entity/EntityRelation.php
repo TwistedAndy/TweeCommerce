@@ -45,7 +45,7 @@ class EntityRelation
         $this->isMultiple = in_array($this->type, ['has-many', 'belongs-many'], true);
 
         // Enforce foreign_key for owning-side relations
-        if (in_array($this->type, ['has-one', 'has-many'], true) && empty($this->foreignKey)) {
+        if (in_array($this->type, ['has-one', 'has-many'], true) and empty($this->foreignKey)) {
             throw new EntityException("foreign_key is required for '{$this->type}' relation '{$name}'");
         }
 
@@ -174,10 +174,14 @@ class EntityRelation
         if ($this->type === 'belongs-many') {
             $pivotTable = $this->registry->getPivotTable($entities[0]->getAlias(), $this->relatedAlias);
 
-            $builder = $this->relatedModel->builder($pivotTable);
+            $builder = $this->relatedModel->builder();
 
-            // Fetch relations via pivot table to build a map.
-            $builder->select("{$this->pivotLocalKey}, {$this->pivotForeignKey}")->whereIn($this->pivotLocalKey, $localIds);
+            $this->relatedModel->maybeExcludeDeleted($builder);
+
+            $builder
+                ->select("{$this->relatedTable}.*, {$pivotTable}.{$this->pivotLocalKey} AS __pivot_local_key")
+                ->join($pivotTable, "{$pivotTable}.{$this->pivotForeignKey} = {$this->relatedTable}.{$this->relatedKey}")
+                ->whereIn("{$pivotTable}.{$this->pivotLocalKey}", $localIds);
 
             if ($dynamicConstraint) {
                 $dynamicConstraint($builder);
@@ -187,50 +191,21 @@ class EntityRelation
                 $this->applyConstraints($builder);
             }
 
-            $pivotRecords = $builder->get()->getResultArray();
+            $rows = $builder->get()->getResultArray();
 
             $this->relatedModel->newQuery();
 
-            $pivotMap          = [];
-            $relatedIdsToFetch = [];
+            $relatedByParentId = [];
 
-            foreach ($pivotRecords as $row) {
-                // Cast to string to guarantee strict type consistency on dictionary lookups
-                $pivotLocalId   = (string) $row[$this->pivotLocalKey];
-                $pivotForeignId = (string) $row[$this->pivotForeignKey];
-
-                $pivotMap[$pivotLocalId][] = $pivotForeignId;
-                $relatedIdsToFetch[]       = $pivotForeignId;
-            }
-
-            // Let the target model pull the entities properly, natively applying soft deletes
-            $relatedEntitiesList = $relatedIdsToFetch ? $this->relatedModel->findMany(array_unique($relatedIdsToFetch)) : [];
-
-            $relatedEntitiesById = [];
-            foreach ($relatedEntitiesList as $relEntity) {
-                $relatedId = $relEntity->getAttribute($this->relatedKey);
-                if (!empty($relatedId)) {
-                    $relatedEntitiesById[(string) $relatedId] = $relEntity;
-                }
+            foreach ($rows as $row) {
+                $parentId = (string) $row['__pivot_local_key'];
+                unset($row['__pivot_local_key']);
+                $relatedByParentId[$parentId][] = $this->relatedModel->hydrateRow($row);
             }
 
             foreach ($entities as $parentEntity) {
-                $parentId = $this->getLocalId($parentEntity);
-                $matched  = [];
-
-                if (!empty($parentId)) {
-                    $strParentId = (string) $parentId;
-
-                    if (isset($pivotMap[$strParentId])) {
-                        foreach ($pivotMap[$strParentId] as $relatedId) {
-                            if (isset($relatedEntitiesById[$relatedId])) {
-                                $matched[] = $relatedEntitiesById[$relatedId];
-                            }
-                        }
-                    }
-                }
-
-                $parentEntity->setAttribute($this->relationName, $matched);
+                $parentId = (string) $this->getLocalId($parentEntity);
+                $parentEntity->setAttribute($this->relationName, $relatedByParentId[$parentId] ?? []);
                 $parentEntity->flushChanges();
             }
 

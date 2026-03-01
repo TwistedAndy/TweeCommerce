@@ -294,6 +294,16 @@ class EntityFields
             throw new EntityException("The condition callback for relation '{$key}' cannot be a Closure. Please use a serializable callable (e.g., string or array).");
         }
 
+        // Validate local_key exists in this entity's fields
+        if (!isset($this->fields[$relation['local_key']])) {
+            throw new EntityException("Local key '{$relation['local_key']}' does not exist in the entity fields for relation '{$key}'");
+        }
+
+        // Validate belongs-one foreign_key exists in this entity's fields
+        if ($relation['type'] === 'belongs-one' and !empty($relation['foreign_key']) and !isset($this->fields[$relation['foreign_key']])) {
+            throw new EntityException("Foreign key '{$relation['foreign_key']}' does not exist in the local entity fields for belongs-one relation '{$key}'");
+        }
+
         $this->relationData[$key] = [
             'type'              => $relation['type'],
             'related'           => $relation['related'],
