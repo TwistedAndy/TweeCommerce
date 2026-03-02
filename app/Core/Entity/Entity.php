@@ -127,12 +127,12 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
                 'type'     => 'relation',
                 'relation' => [
                     'type'       => 'has-many',
-                    'related'    => 'comment',
+                    'entity'     => 'comment',
                     'constraint' => [
-                        'where'   => ['status' => 'approved', 'deleted_at' => null],
-                        'orderBy' => ['created_at', 'DESC'],
-                        'limit'   => 50,
-                        'offset'  => 0,
+                        'where'    => ['status' => 'approved', 'deleted_at' => null],
+                        'orderBy'  => ['created_at', 'DESC'],
+                        'limit'    => 50,
+                        'offset'   => 0,
                         /*
                          * Supported callback formats:
                          * - Local Model Method (String)
@@ -246,7 +246,13 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             $method = static::$entityGetters[$class][$name];
             $value  = $this->$method();
         } else {
-            $value = $this->fields->castFromStorage($name, $this->getAttribute($name));
+            $value = $this->getAttribute($name);
+
+            if ($this->fields->hasField($name)) {
+                $value = $this->fields->castFromStorage($name, $value);
+            } elseif ($this->fields->isSerialized($value)) {
+                $value = unserialize($value);
+            }
         }
 
         $this->escaped[$name] = $value;
@@ -380,7 +386,14 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
         }
 
         $oldValue = $this->getAttribute($field);
-        $newValue = $this->fields->castToStorage($field, $value);
+
+        if ($this->fields->hasField($field)) {
+            $newValue = $this->fields->castToStorage($field, $value);
+        } elseif (is_object($value) or is_array($value)) {
+            $newValue = serialize($value);
+        } else {
+            $newValue = $value;
+        }
 
         if ($oldValue === $newValue) {
             return false;

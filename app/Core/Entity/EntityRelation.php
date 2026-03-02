@@ -25,8 +25,8 @@ class EntityRelation
 
     public function __construct(string $name, array $relation, EntityRegistry $registry)
     {
-        if (empty($relation['related'])) {
-            throw new EntityException('Related entity name is not specified');
+        if (empty($relation['entity'])) {
+            throw new EntityException('A related entity alias is not specified');
         }
 
         $this->registry = $registry;
@@ -38,8 +38,8 @@ class EntityRelation
         $this->constraint   = $relation['constraint'] ?? [];
         $this->cascade      = (bool) ($relation['cascade'] ?? false);
 
-        $this->relatedAlias = $relation['related'];
-        $this->relatedClass = $registry->getEntityClass($relation['related']);
+        $this->relatedAlias = $relation['entity'];
+        $this->relatedClass = $registry->getEntityClass($this->relatedAlias);
         $this->relatedModel = $registry->getModel($this->relatedAlias);
         $this->relatedTable = $this->relatedModel->getTable();
         $this->relatedKey   = $this->relatedModel->getPrimaryKey();
@@ -75,6 +75,10 @@ class EntityRelation
         $localId = $this->getLocalId($localEntity);
 
         match ($this->type) {
+            'meta' => $builder->where(
+                $this->registry->getConfig($this->relatedAlias)['entity_column'] ?? 'entity_id',
+                $localId
+            ),
             'has-one', 'has-many' => $builder->where($this->foreignKey, $localId),
             'belongs-one' => $builder->where(
                 $this->relatedKey,
@@ -93,6 +97,11 @@ class EntityRelation
 
     public function get(EntityInterface $entity): EntityInterface|array|null
     {
+        if ($this->type === 'meta') {
+            $localId = $this->getLocalId($entity);
+            return $localId ? $this->relatedModel->find($localId) : null;
+        }
+
         if ($this->type === 'belongs-one' and !$this->getForeignId($entity)) {
             return null;
         }
@@ -115,6 +124,7 @@ class EntityRelation
         }
 
         match ($this->type) {
+            'meta' => $this->updateMeta($localEntity, $relatedData),
             'has-one' => $this->updateHasOne($localId, $relatedData),
             'has-many' => $this->updateHasMany($localId, $relatedData),
             'belongs-one' => $this->updateBelongsOne($localEntity, $relatedData),
@@ -155,10 +165,14 @@ class EntityRelation
     /**
      * Cascade a delete operation to one or more parent entity IDs.
      *
+     * For meta: remove all the metadata only if the purge option is set to true
+     *
      * For has-one / has-many: one query fetches all related IDs, then delete() runs
-     *   the bulk operation (and their own cascades) recursively.
+     * the bulk operation (and their own cascades) recursively.
+     *
      * For belongs-many: remove pivot records in one DELETE … WHERE IN on hard-delete only,
-     *   so soft-deleted parents can be fully restored including their many-to-many relationships.
+     * so soft-deleted parents can be fully restored including their many-to-many relationships.
+     *
      * For belongs-one: no-op (parent holds the FK; the referenced entity is not owned).
      *
      * @param bool $purge true = hard-delete, false = soft-delete (if the related model supports it)
@@ -166,6 +180,14 @@ class EntityRelation
     public function cascadeDelete(array $localIds, string $localAlias, bool $purge): void
     {
         if (empty($localIds) or $this->type === 'belongs-one') {
+            return;
+        }
+
+        if ($this->type === 'meta') {
+            if ($purge) {
+                $this->relatedModel->delete($localIds, true);
+            }
+
             return;
         }
 
@@ -207,7 +229,7 @@ class EntityRelation
      */
     public function cascadeRestore(array $localIds): void
     {
-        if (empty($localIds) or in_array($this->type, ['belongs-one', 'belongs-many'], true)) {
+        if (empty($localIds) or in_array($this->type, ['belongs-one', 'belongs-many', 'meta'], true)) {
             return;
         }
 
@@ -249,6 +271,33 @@ class EntityRelation
         $localIds = array_values($localIds);
 
         if (empty($localIds)) {
+            return;
+        }
+
+        if ($this->type === 'meta') {
+            $metas = $this->relatedModel->findMany($localIds);
+
+            $metaArray = [];
+
+            foreach ($metas as $meta) {
+                $metaArray[$meta->getAttribute($this->relatedKey)] = $meta;
+            }
+
+            foreach ($entities as $parentEntity) {
+                $parentId = $this->getLocalId($parentEntity);
+
+                // Dynamically instantiate the class based on the registry config
+                // Use $this->relatedKey instead of $this->foreignKey
+                $metaObject = $metaArray[$parentId] ?? new $this->relatedClass([
+                    $this->relatedKey => $parentId
+                ], $this->relatedAlias,
+                    $this->registry->getEntityFields($this->relatedAlias)
+                );
+
+                $parentEntity->setAttribute($this->relationName, $metaObject);
+                $parentEntity->flushChanges();
+            }
+
             return;
         }
 
@@ -417,6 +466,50 @@ class EntityRelation
             ->select("{$this->relatedTable}.*")
             ->join($pivotTable, "{$pivotTable}.{$this->pivotForeignKey} = {$this->relatedTable}.{$this->relatedKey}")
             ->where("{$pivotTable}.{$this->pivotLocalKey}", $localId);
+    }
+
+    /**
+     * Update the metadata for a relation
+     */
+    protected function updateMeta(EntityInterface $localEntity, array|null|EntityInterface $relatedData): void
+    {
+        $localId = $this->getLocalId($localEntity);
+
+        if (empty($localId)) {
+            throw new EntityException('Parent entity must be saved before updating meta.');
+        }
+
+        // Fetch existing meta object or create a blank one
+        $meta = $localEntity->getAttribute($this->relationName);
+
+        if (!$meta instanceof EntityInterface) {
+            $meta = new $this->relatedClass([$this->relatedKey => $localId], $this->relatedAlias, $this->registry->getEntityFields($this->relatedAlias));
+            $localEntity->setAttribute($this->relationName, $meta);
+        }
+
+        // Fetch dynamic column names safely from the MetaModel
+        $config = $this->registry->getConfig($this->relatedAlias);
+
+        $metaKeyColumn   = $config['key_column'] ?? 'meta_key';
+        $metaValueColumn = $config['value_column'] ?? 'meta_value';
+
+        // Clean up and apply the incoming data
+        if (is_array($relatedData)) {
+            foreach ($relatedData as $key => $value) {
+                // Handle dynamic legacy format (e.g. [['custom_key_col' => 'views', 'custom_value_col' => 5]])
+                if (is_array($value) && isset($value[$metaKeyColumn])) {
+                    $meta->setAttribute($value[$metaKeyColumn], $value[$metaValueColumn] ?? null);
+                } else {
+                    // Handle standard associative format: ['views' => 5]
+                    $meta->setAttribute($key, $value);
+                }
+            }
+        } elseif ($relatedData instanceof EntityInterface and $relatedData !== $meta) {
+            $meta->setAttributes($relatedData->getChanges());
+        }
+
+        // Save directly via the MetaModel
+        $this->relatedModel->save($meta);
     }
 
     /**

@@ -3,7 +3,8 @@
 namespace App\Core\Entity;
 
 use \App\Core\Container\Container;
-use \Config\Database;
+use \App\Core\Meta\MetaModel;
+use \App\Core\Meta\Meta;
 use \Config\Entities;
 
 class EntityRegistry
@@ -44,7 +45,11 @@ class EntityRegistry
         $this->fields[$alias] = $config['entity']::initEntity($this->container);
 
         if (empty($config['model'])) {
-            $config['model'] = EntityModel::class;
+            if (is_a($config['entity'], Meta::class, true)) {
+                $config['model'] = MetaModel::class;
+            } else {
+                $config['model'] = EntityModel::class;
+            }
         } elseif (!is_string($config['model']) or !is_a($config['model'], EntityModel::class, true)) {
             throw new EntityException('Entity model should extend the ' . EntityModel::class . ' class.');
         }
@@ -63,10 +68,10 @@ class EntityRegistry
      *
      * @return string|null
      */
-	public function getDatabaseGroup(string $alias): ?string
-	{
-		return $this->config[$alias]['databaseGroup'] ?? null;
-	}
+    public function getDatabaseGroup(string $alias): ?string
+    {
+        return $this->config[$alias]['db_group'] ?? null;
+    }
 
     /**
      * Get the Entity Model object
@@ -149,7 +154,7 @@ class EntityRegistry
      *
      * @return array
      */
-    protected function getConfig(string $alias): array
+    public function getConfig(string $alias): array
     {
         if (empty($this->config[$alias])) {
             throw new EntityException('Entity type not defined for the ' . $alias . ' entity.');

@@ -13,33 +13,21 @@ use DateTimeInterface;
  */
 class EntityFields
 {
-
     protected Container $container;
-
     protected Sanitizer $sanitizer;
 
     protected string $primaryKey = '';
-
     protected string $createdKey = '';
-
     protected string $updatedKey = '';
-
     protected string $deletedKey = '';
 
     protected array $relationData = [];
-
-    protected array $relations = [];
-
-    protected array $fields = [];
-
-    protected array $defaults = [];
-
-    protected array $nullable = [];
-
-    protected array $casts = [];
-
-    protected array $castParams = [];
-
+    protected array $relations    = [];
+    protected array $fields       = [];
+    protected array $defaults     = [];
+    protected array $nullable     = [];
+    protected array $casts        = [];
+    protected array $castParams   = [];
     protected array $castHandlers = [];
 
     protected array $dateFormats = [];
@@ -251,10 +239,12 @@ class EntityFields
      *
      * @param string $key
      * @param array{
-     *   type:         string,
-     *   related:      string,
-     *   local_key?:   string,
-     *   foreign_key?: string,
+     *   type:               string,
+     *   entity:             string,
+     *   local_key?:         string,
+     *   foreign_key?:       string,
+     *   pivot_local_key?:   string,
+     *   pivot_foreign_key?: string,
      *   cascade?:     bool,
      *   constraint?:  array{
      *     limit?:    int,
@@ -271,16 +261,16 @@ class EntityFields
             throw new EntityException("A relation key '{$key}' is already defined");
         }
 
-        if (empty($relation['related']) or !is_string($relation['related'])) {
-            throw new EntityException('A related alias is not specified for the "' . $key . '" relation.');
+        if (empty($relation['entity']) or !is_string($relation['entity'])) {
+            throw new EntityException('A related entity alias is not specified for the "' . $key . '" relation.');
         }
 
         if (empty($relation['type'])) {
             throw new EntityException('A relation type is not specified for the "' . $key . '" relation.');
         }
 
-        if (!is_string($relation['type']) or !in_array($relation['type'], ['has-one', 'has-many', 'belongs-one', 'belongs-many'])) {
-            throw new EntityException('Unsupported type for the "' . $key . '" relation. Supported values: has-one, has-many, belongs-one, or belongs-many');
+        if (!is_string($relation['type']) or !in_array($relation['type'], ['has-one', 'has-many', 'belongs-one', 'belongs-many', 'meta'])) {
+            throw new EntityException('Unsupported type for the "' . $key . '" relation. Supported values: meta, has-one, has-many, belongs-one, or belongs-many');
         }
 
         if (empty($relation['local_key']) or !is_string($relation['local_key'])) {
@@ -307,7 +297,7 @@ class EntityFields
 
         $this->relationData[$key] = [
             'type'              => $relation['type'],
-            'related'           => $relation['related'],
+            'entity'            => $relation['entity'],
             'local_key'         => $relation['local_key'],
             'foreign_key'       => $relation['foreign_key'],
             'pivot_local_key'   => $relation['pivot_local_key'] ?? null,
@@ -323,6 +313,11 @@ class EntityFields
     public function hasRelation(string $key): bool
     {
         return isset($this->relationData[$key]);
+    }
+
+    public function hasField(string $key): bool
+    {
+        return isset($this->fields[$key]);
     }
 
     public function getCreatedKey(): string
@@ -660,7 +655,7 @@ class EntityFields
     /**
      * Check if a string is serialized
      */
-    protected function isSerialized(mixed $string): bool
+    public function isSerialized(mixed $string): bool
     {
         if (!is_string($string)) {
             return false;
