@@ -8,11 +8,13 @@ class EntityRelation
 {
     protected bool           $isMultiple;
     protected string         $type;
+    protected array          $relatedConfig;
     protected string         $relatedAlias;
     protected string         $relatedClass;
     protected string         $relatedTable;
     protected string         $relatedKey;
     protected EntityModel    $relatedModel;
+    protected EntityFields   $relatedFields;
     protected EntityRegistry $registry;
 
     protected string $localKey        = '';
@@ -38,11 +40,13 @@ class EntityRelation
         $this->constraint   = $relation['constraint'] ?? [];
         $this->cascade      = (bool) ($relation['cascade'] ?? false);
 
-        $this->relatedAlias = $relation['entity'];
-        $this->relatedClass = $registry->getEntityClass($this->relatedAlias);
-        $this->relatedModel = $registry->getModel($this->relatedAlias);
-        $this->relatedTable = $this->relatedModel->getTable();
-        $this->relatedKey   = $this->relatedModel->getPrimaryKey();
+        $this->relatedAlias  = $relation['entity'];
+        $this->relatedConfig = $this->registry->getConfig($this->relatedAlias);
+        $this->relatedClass  = $registry->getEntityClass($this->relatedAlias);
+        $this->relatedFields = $registry->getEntityFields($this->relatedAlias);
+        $this->relatedModel  = $registry->getModel($this->relatedAlias);
+        $this->relatedTable  = $this->relatedModel->getTable();
+        $this->relatedKey    = $this->relatedModel->getPrimaryKey();
 
         $this->isMultiple = in_array($this->type, ['has-many', 'belongs-many'], true);
 
@@ -76,7 +80,7 @@ class EntityRelation
 
         match ($this->type) {
             'meta' => $builder->where(
-                $this->registry->getConfig($this->relatedAlias)['entity_column'] ?? 'entity_id',
+                $this->relatedConfig['entity_column'] ?? 'entity_id',
                 $localId
             ),
             'has-one', 'has-many' => $builder->where($this->foreignKey, $localId),
@@ -117,10 +121,9 @@ class EntityRelation
     {
         $localId = $this->getLocalId($localEntity);
 
-        // A parent needs a local ID for all relationships EXCEPT 'belongs-one',
-        // where the parent itself holds the foreign key and will be saved afterwards.
+        // Safely defer relations that require a parent ID until the parent is saved
         if (empty($localId) and $this->type !== 'belongs-one') {
-            throw new EntityException('Parent entity must be saved before updating relations.');
+            return;
         }
 
         match ($this->type) {
@@ -257,45 +260,37 @@ class EntityRelation
             return;
         }
 
-        $localIds = [];
+        $localIds  = [];
+        $entityKey = $this->type === 'belongs-one' ? $this->foreignKey : $this->localKey;
 
-        // Clean extraction loop using array keys for instant uniqueness mapping
         foreach ($entities as $entity) {
-            $id = $this->type === 'belongs-one' ? $this->getForeignId($entity) : $this->getLocalId($entity);
-
-            if (!empty($id)) {
-                $localIds[(string) $id] = $id;
-            }
+            $localIds[] = $entity->getAttribute($entityKey);
         }
 
-        $localIds = array_values($localIds);
+        // Strip out nulls and duplicates to prevent invalid WHERE IN queries
+        $localIds = array_filter($localIds);
 
         if (empty($localIds)) {
             return;
         }
 
         if ($this->type === 'meta') {
-            $metas = $this->relatedModel->findMany($localIds);
-
+            $metas     = $this->relatedModel->findMany($localIds);
             $metaArray = [];
 
             foreach ($metas as $meta) {
                 $metaArray[$meta->getAttribute($this->relatedKey)] = $meta;
             }
 
-            foreach ($entities as $parentEntity) {
-                $parentId = $this->getLocalId($parentEntity);
+            foreach ($entities as $entity) {
+                $parentId = $this->getLocalId($entity);
 
-                // Dynamically instantiate the class based on the registry config
-                // Use $this->relatedKey instead of $this->foreignKey
                 $metaObject = $metaArray[$parentId] ?? new $this->relatedClass([
                     $this->relatedKey => $parentId
-                ], $this->relatedAlias,
-                    $this->registry->getEntityFields($this->relatedAlias)
-                );
+                ], $this->relatedAlias, $this->relatedFields);
 
-                $parentEntity->setAttribute($this->relationName, $metaObject);
-                $parentEntity->flushChanges();
+                $entity->setAttribute($this->relationName, $metaObject);
+                $entity->flushChanges();
             }
 
             return;
@@ -362,9 +357,7 @@ class EntityRelation
 
         $relatedEntities = [];
         foreach ($relatedRecords as $row) {
-            // Bypass find() entirely to prevent N+1 database queries.
-            $entity            = $this->relatedModel->hydrateRow($row);
-            $relatedEntities[] = $entity;
+            $relatedEntities[] = $this->relatedModel->hydrateRow($row);
         }
 
         foreach ($entities as $parentEntity) {
@@ -378,13 +371,13 @@ class EntityRelation
 
             if ($this->type === 'belongs-one') {
                 foreach ($relatedEntities as $relatedEntity) {
-                    if ($relatedEntity->getAttribute($this->relatedKey) === $parentId) {
+                    if ($relatedEntity->getAttribute($this->relatedKey) == $parentId) {
                         $matched[] = $relatedEntity;
                     }
                 }
             } else {
                 foreach ($relatedEntities as $relatedEntity) {
-                    if ($relatedEntity->getAttribute($this->foreignKey) === $parentId) {
+                    if ($relatedEntity->getAttribute($this->foreignKey) == $parentId) {
                         $matched[] = $relatedEntity;
                     }
                 }
@@ -473,7 +466,7 @@ class EntityRelation
      */
     protected function updateMeta(EntityInterface $localEntity, array|null|EntityInterface $relatedData): void
     {
-        $localId = $this->getLocalId($localEntity);
+        $localId = $localEntity->getAttribute($this->localKey);
 
         if (empty($localId)) {
             throw new EntityException('Parent entity must be saved before updating meta.');
@@ -483,21 +476,22 @@ class EntityRelation
         $meta = $localEntity->getAttribute($this->relationName);
 
         if (!$meta instanceof EntityInterface) {
-            $meta = new $this->relatedClass([$this->relatedKey => $localId], $this->relatedAlias, $this->registry->getEntityFields($this->relatedAlias));
+            $meta = new $this->relatedClass([], $this->relatedAlias, $this->relatedFields);
             $localEntity->setAttribute($this->relationName, $meta);
         }
 
         // Fetch dynamic column names safely from the MetaModel
-        $config = $this->registry->getConfig($this->relatedAlias);
+        $metaKeyColumn   = $this->relatedConfig['key_column'] ?? 'meta_key';
+        $metaValueColumn = $this->relatedConfig['value_column'] ?? 'meta_value';
 
-        $metaKeyColumn   = $config['key_column'] ?? 'meta_key';
-        $metaValueColumn = $config['value_column'] ?? 'meta_value';
+        // Explicitly bind the parent ID to the Meta object's virtual primary key ('id')
+        $meta->setAttribute($this->relatedKey, $localId);
 
-        // Clean up and apply the incoming data
+        // Clean up and apply incoming data (safeguard for direct manual calls)
         if (is_array($relatedData)) {
             foreach ($relatedData as $key => $value) {
                 // Handle dynamic legacy format (e.g. [['custom_key_col' => 'views', 'custom_value_col' => 5]])
-                if (is_array($value) && isset($value[$metaKeyColumn])) {
+                if (is_array($value) and isset($value[$metaKeyColumn])) {
                     $meta->setAttribute($value[$metaKeyColumn], $value[$metaValueColumn] ?? null);
                 } else {
                     // Handle standard associative format: ['views' => 5]
@@ -521,19 +515,22 @@ class EntityRelation
             return;
         }
 
-        // Detach any existing entity that currently belongs to this parent
-        $this->relatedModel->builder()
-            ->where($this->foreignKey, $localId)
-            ->update([$this->foreignKey => null]);
-
-        $this->relatedModel->newQuery();
-
         $entity = $this->resolveOne($relatedData);
 
-        // Attach and save the new entity (if one was provided)
         if ($entity instanceof EntityInterface) {
+            // Assign and save the new child first
             $entity->setAttribute($this->foreignKey, $localId);
             $this->relatedModel->save($entity);
+
+            $entityId = $entity->getAttribute($this->relatedKey);
+
+            // Detach any OLD orphans, strictly excluding the one we just saved
+            $excludeIds = empty($entityId) ? [] : [$entityId];
+            $this->relatedModel->detachOrphans($this->foreignKey, $localId, $excludeIds);
+
+        } else {
+            // If null/empty was passed, intentionally detach everything
+            $this->relatedModel->detachOrphans($this->foreignKey, $localId);
         }
     }
 
@@ -548,8 +545,7 @@ class EntityRelation
 
         // If empty array, detach everything and exit
         if (empty($relatedData)) {
-            $this->relatedModel->builder()->where($this->foreignKey, $localId)->update([$this->foreignKey => null]);
-            $this->relatedModel->newQuery();
+            $this->relatedModel->detachOrphans($this->foreignKey, $localId);
             return;
         }
 
@@ -567,15 +563,8 @@ class EntityRelation
             }
         }
 
-        $builder = $this->relatedModel->builder()->where($this->foreignKey, $localId);
-
-        if (!empty($entityIds)) {
-            $builder->whereNotIn($this->relatedKey, array_unique($entityIds));
-        }
-
-        $builder->update([$this->foreignKey => null]);
-
-        $this->relatedModel->newQuery();
+        // Detach ONLY the children that are not in our new list
+        $this->relatedModel->detachOrphans($this->foreignKey, $localId, $entityIds);
     }
 
     /**
@@ -583,17 +572,20 @@ class EntityRelation
      */
     protected function updateBelongsOne(EntityInterface $localEntity, array|null|EntityInterface $relatedData): void
     {
-        $localId = $this->getLocalId($localEntity);
-
         $relatedEntity = $this->resolveOne($relatedData);
-        $relatedId     = $relatedEntity ? $this->getLocalId($relatedEntity) : null;
+
+        if ($relatedEntity instanceof EntityInterface) {
+            $relatedId = $relatedEntity->getAttribute($this->relatedKey);
+
+            if (empty($relatedId) or $relatedEntity->hasChanged()) {
+                $this->relatedModel->save($relatedEntity);
+                $relatedId = $relatedEntity->getAttribute($this->relatedKey);
+            }
+        } else {
+            $relatedId = null;
+        }
 
         $localEntity->setAttribute($this->foreignKey, $relatedId);
-
-        if (!empty($localId)) {
-            $localModel = $this->registry->getModel($localEntity->getAlias());
-            $localModel->update($localId, $localEntity);
-        }
     }
 
     /**
@@ -674,6 +666,7 @@ class EntityRelation
             return null;
         }
 
+        // Catch sequential arrays passed to a singular relation
         if (is_array($value) and array_is_list($value)) {
             throw new EntityException(sprintf('Relation "%s" expects a single ID, associative array, or %s instance. Sequential array provided.', $this->relatedClass, $this->relatedClass));
         }
@@ -685,10 +678,12 @@ class EntityRelation
             return $value;
         }
 
+        // If it's a scalar ID, fetch it from the database/cache
         if (is_scalar($value)) {
             return $this->relatedModel->find($value) ?? throw new EntityException("Could not find related {$this->relatedClass} with ID {$value}");
         }
 
+        // If it's an associative array, either update an existing record or create a new one
         if (is_array($value) and !array_is_list($value)) {
             $relatedId = $value[$this->relatedKey] ?? null;
 
@@ -698,7 +693,12 @@ class EntityRelation
                 return $existing;
             }
 
-            return new $this->relatedClass($value, $this->relatedAlias);
+            // Instantiate an empty entity and use setAttributes() so the data is
+            // registered internally as $changes. Otherwise, the model will skip saving it
+            $entity = new $this->relatedClass([], $this->relatedAlias, $this->relatedFields);
+            $entity->setAttributes($value);
+
+            return $entity;
         }
 
         throw new EntityException(sprintf('Invalid data type for relation "%s". Expected ID, associative array, or %s instance.', $this->relatedClass, $this->relatedClass));
@@ -713,7 +713,7 @@ class EntityRelation
             return [];
         }
 
-        // Wrap single items (scalar ID, associative array, or Entity) into an array
+        // Wrap single items (scalar ID, associative array, or Entity) into an array seamlessly
         if (is_scalar($value) or $value instanceof EntityInterface or (is_array($value) and !array_is_list($value))) {
             $value = [$value];
         }
@@ -739,16 +739,20 @@ class EntityRelation
                     $existing->setAttributes($item);
                     $entities[] = $existing;
                 } else {
-                    $entities[] = new $this->relatedClass($item, $this->relatedAlias);
+                    // Use setAttributes() to register the array data as $changes
+                    $entity = new $this->relatedClass([], $this->relatedAlias, $this->relatedFields);
+                    $entity->setAttributes($item);
+                    $entities[] = $entity;
                 }
             } elseif (is_scalar($item)) {
+                // Batch all simple IDs to fetch them in a single optimized query later
                 $idsToFetch[] = $item;
             } else {
                 throw new EntityException(sprintf('Invalid item type in relation "%s". Expected ID, associative array, or %s instance.', $this->relatedClass, $this->relatedClass));
             }
         }
 
-        // Fetch all scalar IDs in a single query
+        // Fetch all scalar IDs in a single highly-optimized query
         if ($idsToFetch) {
             $entities = array_merge($entities, $this->relatedModel->findMany($idsToFetch));
         }

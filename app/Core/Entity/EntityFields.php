@@ -307,19 +307,6 @@ class EntityFields
         ];
     }
 
-    /**
-     * Check if a field contains a relation
-     */
-    public function hasRelation(string $key): bool
-    {
-        return isset($this->relationData[$key]);
-    }
-
-    public function hasField(string $key): bool
-    {
-        return isset($this->fields[$key]);
-    }
-
     public function getCreatedKey(): string
     {
         return $this->createdKey;
@@ -341,6 +328,14 @@ class EntityFields
     public function getDateFormat(string $key): string|null
     {
         return $this->dateFormats[$key] ?? null;
+    }
+
+    /**
+     * Get relation data
+     */
+    public function getRelations(): array
+    {
+        return $this->relationData;
     }
 
     /**
@@ -367,22 +362,6 @@ class EntityFields
     }
 
     /**
-     * Get relation keys
-     */
-    public function getRelationKeys(): array
-    {
-        return array_keys($this->relationData);
-    }
-
-    /**
-     * Get a relation type
-     */
-    public function getRelationType(string $key): string
-    {
-        return isset($this->relationData[$key]) ? $this->relationData[$key]['type'] : '';
-    }
-
-    /**
      * Get all fields in the normalized format
      */
     public function getFields(): array
@@ -396,22 +375,6 @@ class EntityFields
     public function getField(string $key): array|null
     {
         return $this->fields[$key] ?? null;
-    }
-
-    /**
-     * Get all field casts
-     */
-    public function getCasts(): array
-    {
-        return $this->casts;
-    }
-
-    /**
-     * Get a field cast
-     */
-    public function getCast(string $key): string
-    {
-        return $this->casts[$key] ?? '';
     }
 
     /**

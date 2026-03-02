@@ -31,7 +31,7 @@ class Meta extends Entity
         return $this->__get($key);
     }
 
-    public function update(string $key, mixed $value): void
+    public function set(string $key, mixed $value): void
     {
         $this->__set($key, $value);
     }

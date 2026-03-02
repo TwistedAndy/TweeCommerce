@@ -184,16 +184,17 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
     /**
      * Escaped attribute values in the entity format
      */
-    protected array $escaped = [];
-
+    protected array  $escaped      = [];
+    protected array  $fieldList    = [];
+    protected array  $relationList = [];
     protected string $alias;
-
-    protected bool $customFields = false;
 
     /**
      * Current Entity Fields object
      */
     protected EntityFields $fields;
+
+    protected bool $customFields = false;
 
     public function __construct(array $data = [], ?string $alias = null, ?EntityFields $fields = null)
     {
@@ -218,6 +219,9 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
         }
 
         $this->attributes = $data;
+
+        $this->fieldList    = $this->fields->getFields();
+        $this->relationList = $this->fields->getRelations();
     }
 
     public function __isset(string $name): bool
@@ -236,7 +240,7 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             return $this->escaped[$name];
         }
 
-        if ($this->fields->hasRelation($name)) {
+        if (isset($this->relationList[$name])) {
             return $this->getAttribute($name);
         }
 
@@ -248,7 +252,7 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
         } else {
             $value = $this->getAttribute($name);
 
-            if ($this->fields->hasField($name)) {
+            if (isset($this->fieldList[$name])) {
                 $value = $this->fields->castFromStorage($name, $value);
             } elseif ($this->fields->isSerialized($value)) {
                 $value = unserialize($value);
@@ -326,6 +330,9 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             $this->customFields = false;
             $this->fields       = static::initEntity();
         }
+
+        $this->fieldList    = $this->fields->getFields();
+        $this->relationList = $this->fields->getRelations();
     }
 
     /**
@@ -349,12 +356,16 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             return $this->attributes[$key];
         }
 
-        if ($this->fields->hasRelation($key)) {
+        if (isset($this->relationList[$key])) {
             $value = $this->fields->getRelation($key)->get($this);
 
             $this->attributes[$key] = $value;
             return $value;
         }
+
+        $value = $this->fields->getDefaultValue($key);
+
+        $this->attributes[$key] = $value;
 
         return $this->fields->getDefaultValue($key);
     }
@@ -374,20 +385,47 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
      */
     public function setAttribute(string $field, mixed $value): bool
     {
-        if ($this->fields->hasRelation($field)) {
-            $value = $this->fields->getRelation($field)->resolve($value);
+        if (isset($this->relationList[$field])) {
+            $relation = $this->fields->getRelation($field);
 
+            // Read directly from raw memory arrays to prevent N+1 queries
+            $existing = $this->changes[$field] ?? $this->attributes[$field] ?? null;
+
+            // If assigning an associative array to an existing entity, update it in place
+            if ($existing instanceof EntityInterface and is_array($value) and !array_is_list($value)) {
+                $existing->setAttributes($value);
+                $value = $existing;
+            } else {
+                // Normalizes the input into EntityInterface or EntityInterface[]
+                $value = $relation->resolve($value);
+            }
+
+            // Exact identical instances (e.g., same mutated memory object)
+            if ($existing === $value) {
+                return false;
+            }
+
+            // Singular Entity Comparison: Compare Primary Keys natively
+            if ($existing instanceof EntityInterface and $value instanceof EntityInterface) {
+                $primaryKey = $existing->getFields()->getPrimaryKey();
+                $existingId = $existing->getAttribute($primaryKey);
+                $valueId    = $value->getAttribute($primaryKey);
+
+                if ($existingId !== null and $existingId === $valueId and $existing->getAlias() === $value->getAlias()) {
+                    return false;
+                }
+            }
+
+            // Arrays (has-many/belongs-many) bypass the above checks and assumed to be changed
             $this->attributes[$field] = $value;
             $this->changes[$field]    = $value;
-
-            unset($this->escaped[$field]);
 
             return true;
         }
 
         $oldValue = $this->getAttribute($field);
 
-        if ($this->fields->hasField($field)) {
+        if (isset($this->fieldList[$field])) {
             $newValue = $this->fields->castToStorage($field, $value);
         } elseif (is_object($value) or is_array($value)) {
             $newValue = serialize($value);

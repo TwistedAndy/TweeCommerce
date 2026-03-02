@@ -43,6 +43,7 @@ class EntityModel
     protected ValidationInterface $validator;
 
     protected array $allowedFields        = [];
+    protected array $relationFields       = [];
     protected array $validationRules      = [];
     protected array $validationErrors     = [];
     protected bool  $cleanValidationRules = true;
@@ -138,15 +139,21 @@ class EntityModel
         $this->deletedField = $entityFields->getDeletedKey();
 
         $allowedFields   = [];
+        $relationFields  = [];
         $validationRules = [];
 
         $fieldList  = $entityFields->getFields();
         $primaryKey = $entityFields->getPrimaryKey();
+        $relations  = $entityFields->getRelations();
 
         foreach ($fieldList as $key => $field) {
 
-            if ($key != $primaryKey and !$entityFields->hasRelation($key)) {
-                $allowedFields[] = $key;
+            if ($key != $primaryKey) {
+                if (isset($relations[$key])) {
+                    $relationFields[$key] = true;
+                } else {
+                    $allowedFields[$key] = true;
+                }
             }
 
             if (empty($field['rules']) or !is_array($field['rules']) or empty($field['rules']['rules'])) {
@@ -182,6 +189,7 @@ class EntityModel
         $this->useSoftDeletes = (bool) $this->deletedField;
 
         $this->allowedFields   = $allowedFields;
+        $this->relationFields  = $relationFields;
         $this->validationRules = $validationRules;
 
         if ($this->createdField) {
@@ -429,25 +437,31 @@ class EntityModel
 
         $this->cleanValidationRules = $cleanRules;
 
-        if ($this->createdField) {
-            $entity->setAttribute($this->createdField, time());
-        }
-
-        $data = $entity->getAttributes();
-
-        $data = array_intersect_key($data, $this->entityFields->getFields());
-
-        if (empty($data)) {
-            return false;
-        }
-
-        $useTransaction = !empty($this->entityFields->getRelationKeys());
+        $useTransaction = count($this->entityFields->getRelations()) > 0;
 
         if ($useTransaction) {
             $this->db->transBegin();
         }
 
         try {
+            // Pre-Save Relations (Transforms relation objects into FKs like author_id)
+            if ($this->relationFields) {
+                $this->saveRelations($entity);
+            }
+
+            if ($this->createdField) {
+                $entity->setAttribute($this->createdField, time());
+            }
+
+            $data = array_intersect_key($entity->getAttributes(), $this->allowedFields);
+
+            if (empty($data)) {
+                if ($useTransaction) {
+                    $this->db->transRollback();
+                }
+                return false;
+            }
+
             $success = $this->builder()->insert($data);
             $this->newQuery();
 
@@ -461,7 +475,11 @@ class EntityModel
             $insertId = $this->db->insertID();
             $entity->setAttribute($this->primaryKey, $insertId);
 
-            $this->saveRelations($entity);
+            // Post-Save Relations (has-many, meta, etc.)
+            if ($this->relationFields) {
+                $this->saveRelations($entity);
+            }
+
             $entity->flushChanges();
 
             static::addToIdentityMap($this->entityAlias . '_' . $insertId, $entity);
@@ -482,7 +500,6 @@ class EntityModel
     public function update(int|string $id, EntityInterface $entity): bool
     {
         if (!$entity->hasChanged()) {
-            $this->saveRelations($entity);
             return true;
         }
 
@@ -494,21 +511,26 @@ class EntityModel
             return false;
         }
 
-        if ($this->updatedField) {
-            $entity->setAttribute($this->updatedField, time());
-        }
-
-        $changes = $entity->getChanges();
-
-        $changes = array_intersect_key($changes, $this->entityFields->getFields());
-
-        $useTransaction = !empty($this->entityFields->getRelationKeys());
+        $useTransaction = count($this->entityFields->getRelations()) > 1;
 
         if ($useTransaction) {
             $this->db->transBegin();
         }
 
         try {
+            // Pre-Save Relations
+            if ($this->relationFields) {
+                $this->saveRelations($entity);
+            }
+
+            if ($this->updatedField) {
+                $entity->setAttribute($this->updatedField, time());
+            }
+
+            // Extract changes AFTER pre-save relations have run
+            $changes = $entity->getChanges();
+            $changes = array_intersect_key($changes, $this->allowedFields);
+
             if (!empty($changes)) {
                 $builder = $this->builder();
 
@@ -520,7 +542,11 @@ class EntityModel
 
             $this->newQuery();
 
-            $this->saveRelations($entity);
+            // Post-Save Relations
+            if ($this->relationFields) {
+                $this->saveRelations($entity);
+            }
+
             $entity->flushChanges();
 
             static::addToIdentityMap($this->entityAlias . '_' . $id, $entity);
@@ -554,7 +580,7 @@ class EntityModel
             return true;
         }
 
-        $useTransaction = !empty($this->entityFields->getRelationKeys());
+        $useTransaction = count($this->relationFields) > 0;
 
         if ($useTransaction) {
             $this->db->transBegin();
@@ -608,7 +634,7 @@ class EntityModel
             return true;
         }
 
-        $useTransaction = !empty($this->entityFields->getRelationKeys());
+        $useTransaction = count($this->relationFields) > 0;
 
         if ($useTransaction) {
             $this->db->transBegin();
@@ -683,6 +709,53 @@ class EntityModel
         }
 
         $query->delete();
+    }
+
+    /**
+     * Finds orphaned records matching a foreign key and detaches them natively,
+     * utilizing updateField() to ensure the Identity Map cache is perfectly purged.
+     */
+    public function detachOrphans(string $foreignKey, int|string $localId, array $excludeIds = []): void
+    {
+        $builder = $this->builder()->select($this->primaryKey)->where($foreignKey, $localId);
+
+        if (!empty($excludeIds)) {
+            $builder->whereNotIn($this->primaryKey, array_unique($excludeIds));
+        }
+
+        $ids = array_column($builder->get()->getResultArray(), $this->primaryKey);
+        $this->newQuery();
+
+        // Pass the IDs to our generic update method to handle the DB write and cache purge!
+        $this->updateField($ids, $foreignKey, null);
+    }
+
+    /**
+     * Quickly update a specific field for one or more entity IDs directly in the database.
+     * Bypasses validation and entity lifecycle, but safely clears the Identity Map cache.
+     */
+    public function updateField(int|string|array $ids, string $field, mixed $value): bool
+    {
+        if (empty($ids)) {
+            return true;
+        }
+
+        if (!is_array($ids)) {
+            $ids = [$ids];
+        }
+
+        $builder = $this->builder();
+        $this->withDeleted(); // Ensure we can detach soft-deleted records if necessary
+
+        $result = $builder->whereIn($this->primaryKey, $ids)->update([$field => $value]);
+        $this->newQuery();
+
+        // Purge modified entities from the Identity Map so they reload fresh
+        foreach ($ids as $id) {
+            static::deleteFromIdentityMap($this->entityAlias . '_' . $id);
+        }
+
+        return $result;
     }
 
     public function sync(string $pivotTable, string $localKey, string $foreignKey, int|string $localId, array $relatedIds): void
@@ -792,7 +865,7 @@ class EntityModel
      */
     public function validate(EntityInterface|array $data): bool
     {
-        if ($this->skipValidation || empty($this->validationRules)) {
+        if ($this->skipValidation or empty($this->validationRules)) {
             return true;
         }
 
@@ -861,10 +934,8 @@ class EntityModel
         }
 
         foreach ($relations as $relationName) {
-            $relation = $this->entityFields->getRelation($relationName);
-
-            if ($relation) {
-                $relation->eagerLoad($entities);
+            if (!empty($this->relationFields[$relationName])) {
+                $this->entityFields->getRelation($relationName)->eagerLoad($entities);
             }
         }
     }
@@ -874,10 +945,10 @@ class EntityModel
      */
     protected function runCascadeDelete(array $ids, bool $purge): void
     {
-        foreach ($this->entityFields->getRelationKeys() as $key) {
+        foreach ($this->relationFields as $key => $flag) {
             $relation = $this->entityFields->getRelation($key);
 
-            if ($relation !== null and $relation->isCascade()) {
+            if ($relation->isCascade()) {
                 $relation->cascadeDelete($ids, $this->entityAlias, $purge);
             }
         }
@@ -888,24 +959,56 @@ class EntityModel
      */
     protected function runCascadeRestore(array $ids): void
     {
-        foreach ($this->entityFields->getRelationKeys() as $key) {
+        foreach ($this->relationFields as $key => $flag) {
             $relation = $this->entityFields->getRelation($key);
 
-            if ($relation !== null and $relation->isCascade()) {
+            if ($relation->isCascade()) {
                 $relation->cascadeRestore($ids);
             }
         }
     }
 
+    /**
+     * Save the entity relations
+     */
     protected function saveRelations(EntityInterface $entity): void
     {
-        $relations = $this->entityFields->getRelationKeys();
-        $changes   = $entity->getChanges();
+        $changes    = $entity->getChanges();
+        $attributes = $entity->getAttributes();
 
-        $changedRelations = array_intersect_key($changes, array_flip($relations));
+        foreach ($this->relationFields as $field => $flag) {
 
-        foreach ($changedRelations as $field => $value) {
-            $this->entityFields->getRelation($field)->update($entity, $value);
+            // Process immediately explicit assignments
+            if (array_key_exists($field, $changes)) {
+                $this->entityFields->getRelation($field)->update($entity, $changes[$field]);
+                continue;
+            }
+
+            // Skip deep scan if a relation was never loaded
+            if (empty($attributes[$field])) {
+                continue;
+            }
+
+            // Deep Scanning: Check the currently loaded attribute
+            $value = $attributes[$field];
+
+            $hasDeepChanges = false;
+
+            if ($value instanceof EntityInterface) {
+                $hasDeepChanges = $value->hasChanged();
+            } elseif (is_array($value)) {
+                foreach ($value as $item) {
+                    if ($item instanceof EntityInterface && $item->hasChanged()) {
+                        $hasDeepChanges = true;
+                        break;
+                    }
+                }
+            }
+
+            // If any loaded entity has changed, push it into the update cycle
+            if ($hasDeepChanges) {
+                $this->entityFields->getRelation($field)->update($entity, $value);
+            }
         }
     }
 }
