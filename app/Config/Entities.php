@@ -21,14 +21,23 @@ class Entities extends BaseConfig
             'entity' => Post::class,
             'table'  => 'posts',
             'pivots' => [
-                'term' => 'term_relationships', // Many-to-Many Pivot Tables as 'entity_alias' => 'table'
+                // Many-to-Many Pivot Tables as 'entity_alias' => array
+                'term' => [
+                    'table'          => 'term_relationships',
+                    'local_column'   => 'post_id',
+                    'foreign_column' => 'term_id',
+                ],
             ]
         ],
         'term'         => [
             'entity' => Term::class,
             'table'  => 'terms',
             'pivots' => [
-                'post' => 'term_relationships',
+                'post' => [
+                    'table'          => 'term_relationships',
+                    'local_column'   => 'term_id',
+                    'foreign_column' => 'post_id',
+                ],
             ]
         ],
         'comment'      => [

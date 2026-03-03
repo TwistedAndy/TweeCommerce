@@ -239,12 +239,10 @@ class EntityFields
      *
      * @param string $key
      * @param array{
-     *   type:               string,
-     *   entity:             string,
-     *   local_key?:         string,
-     *   foreign_key?:       string,
-     *   pivot_local_key?:   string,
-     *   pivot_foreign_key?: string,
+     *   type:         string,
+     *   entity:       string,
+     *   local_key?:   string,
+     *   foreign_key?: string,
      *   cascade?:     bool,
      *   constraint?:  array{
      *     limit?:    int,
@@ -296,14 +294,12 @@ class EntityFields
         }
 
         $this->relationData[$key] = [
-            'type'              => $relation['type'],
-            'entity'            => $relation['entity'],
-            'local_key'         => $relation['local_key'],
-            'foreign_key'       => $relation['foreign_key'],
-            'pivot_local_key'   => $relation['pivot_local_key'] ?? null,
-            'pivot_foreign_key' => $relation['pivot_foreign_key'] ?? null,
-            'constraint'        => $relation['constraint'] ?? [],
-            'cascade'           => (bool) ($relation['cascade'] ?? false),
+            'type'        => $relation['type'],
+            'entity'      => $relation['entity'],
+            'local_key'   => $relation['local_key'],
+            'foreign_key' => $relation['foreign_key'],
+            'constraint'  => $relation['constraint'] ?? [],
+            'cascade'     => (bool) ($relation['cascade'] ?? false),
         ];
     }
 

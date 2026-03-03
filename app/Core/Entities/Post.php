@@ -69,10 +69,10 @@ class Post extends Entity
             'terms'      => [
                 'type'     => 'relation',
                 'relation' => [
-                    'type'              => 'belongs-many',
-                    'entity'            => 'term',
-                    'pivot_local_key'   => 'post_id',
-                    'pivot_foreign_key' => 'term_id'
+                    'type'        => 'belongs-many',
+                    'entity'      => 'term',
+                    'local_key'   => 'id', // By default, it's the local primary key
+                    'foreign_key' => 'id' // By default, it's a foreign primary key
                 ]
             ],
             'meta'       => [

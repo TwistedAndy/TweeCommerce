@@ -17,13 +17,12 @@ class EntityRelation
     protected EntityFields   $relatedFields;
     protected EntityRegistry $registry;
 
-    protected string $localKey        = '';
-    protected string $foreignKey      = '';
-    protected string $pivotLocalKey   = '';
-    protected string $pivotForeignKey = '';
-    protected string $relationName    = '';
-    protected array  $constraint      = [];
-    protected bool   $cascade         = false;
+    protected string $localKey     = '';
+    protected string $foreignKey   = '';
+    protected string $relationName = '';
+    protected array  $constraint   = [];
+    protected bool   $cascade      = false;
+    protected array  $pivot        = [];
 
     public function __construct(string $name, array $relation, EntityRegistry $registry)
     {
@@ -33,36 +32,26 @@ class EntityRelation
 
         $this->registry = $registry;
 
-        $this->type         = $relation['type'] ?? throw new EntityException('Relation type is not specified');
-        $this->localKey     = $relation['local_key'] ?? throw new EntityException('Local key is not specified');
-        $this->foreignKey   = $relation['foreign_key'] ?? throw new EntityException('Foreign key is not specified');
-        $this->relationName = $name;
+        $this->type         = $relation['type'] ?? '';
+        $this->localKey     = $relation['local_key'] ?? '';
+        $this->foreignKey   = $relation['foreign_key'] ?? '';
         $this->constraint   = $relation['constraint'] ?? [];
         $this->cascade      = (bool) ($relation['cascade'] ?? false);
+        $this->relationName = $name;
 
         $this->relatedAlias  = $relation['entity'];
         $this->relatedConfig = $this->registry->getConfig($this->relatedAlias);
         $this->relatedClass  = $registry->getEntityClass($this->relatedAlias);
         $this->relatedFields = $registry->getEntityFields($this->relatedAlias);
         $this->relatedModel  = $registry->getModel($this->relatedAlias);
-        $this->relatedTable  = $this->relatedModel->getTable();
-        $this->relatedKey    = $this->relatedModel->getPrimaryKey();
+        $this->relatedTable  = $this->registry->getEntityTable($this->relatedAlias);
+        $this->relatedKey    = $this->relatedFields->getPrimaryKey();
 
         $this->isMultiple = in_array($this->type, ['has-many', 'belongs-many'], true);
 
-        // Enforce foreign_key for owning-side relations
-        if (in_array($this->type, ['has-one', 'has-many'], true) and empty($this->foreignKey)) {
-            throw new EntityException("foreign_key is required for '{$this->type}' relation '{$name}'");
-        }
-
         // Enforce pivot keys for belongs-many relations
-        if ($this->type === 'belongs-many') {
-            if (empty($relation['pivot_local_key']) or empty($relation['pivot_foreign_key'])) {
-                throw new EntityException("Both pivot_local_key and pivot_foreign_key are required for belongs-many relation");
-            }
-
-            $this->pivotLocalKey   = $relation['pivot_local_key'];
-            $this->pivotForeignKey = $relation['pivot_foreign_key'];
+        if ($this->type === 'belongs-many' and empty($this->foreignKey)) {
+            $this->foreignKey = $this->relatedKey;
         }
     }
 
@@ -196,10 +185,10 @@ class EntityRelation
 
         if ($this->type === 'belongs-many') {
             if ($purge) {
-                $pivotTable = $this->registry->getPivotTable($localAlias, $this->relatedAlias);
+                $pivotConfig = $this->registry->getPivotConfig($localAlias, $this->relatedAlias);
 
-                if (!empty($pivotTable)) {
-                    $this->relatedModel->detach($pivotTable, $this->pivotLocalKey, $this->pivotForeignKey, $localIds);
+                if (!empty($pivotConfig)) {
+                    $this->relatedModel->detachPivot($pivotConfig['table'], $pivotConfig['local_column'], $pivotConfig['foreign_column'], $localIds);
                 }
             }
 
@@ -297,16 +286,20 @@ class EntityRelation
         }
 
         if ($this->type === 'belongs-many') {
-            $pivotTable = $this->registry->getPivotTable($entities[0]->getAlias(), $this->relatedAlias);
+            $pivotConfig = $this->registry->getPivotConfig($entities[0]->getAlias(), $this->relatedAlias);
+
+            if (empty($pivotConfig)) {
+                return;
+            }
 
             $builder = $this->relatedModel->builder();
 
             $this->relatedModel->maybeExcludeDeleted($builder);
 
             $builder
-                ->select("{$this->relatedTable}.*, {$pivotTable}.{$this->pivotLocalKey} AS __pivot_local_key")
-                ->join($pivotTable, "{$pivotTable}.{$this->pivotForeignKey} = {$this->relatedTable}.{$this->relatedKey}")
-                ->whereIn("{$pivotTable}.{$this->pivotLocalKey}", $localIds);
+                ->select("{$this->relatedTable}.*, {$pivotConfig['table']}.{$pivotConfig['local_column']} AS __pivot_local_key")
+                ->join($pivotConfig['table'], "{$pivotConfig['table']}.{$pivotConfig['foreign_column']} = {$this->relatedTable}.{$this->foreignKey}")
+                ->whereIn("{$pivotConfig['table']}.{$pivotConfig['local_column']}", $localIds);
 
             if ($dynamicConstraint) {
                 $dynamicConstraint($builder);
@@ -449,16 +442,16 @@ class EntityRelation
 
     protected function buildBelongsManyQuery(EntityInterface $localEntity, int|string|null $localId): void
     {
-        $pivotTable = $this->registry->getPivotTable($localEntity->getAlias(), $this->relatedAlias);
+        $pivotConfig = $this->registry->getPivotConfig($localEntity->getAlias(), $this->relatedAlias);
 
-        if (empty($pivotTable)) {
-            throw new EntityException("Pivot table not defined for the {$this->relatedAlias} relation.");
+        if (empty($pivotConfig)) {
+            throw new EntityException("Pivot config not defined for the {$this->relatedAlias} relation.");
         }
 
         $this->relatedModel->builder()
             ->select("{$this->relatedTable}.*")
-            ->join($pivotTable, "{$pivotTable}.{$this->pivotForeignKey} = {$this->relatedTable}.{$this->relatedKey}")
-            ->where("{$pivotTable}.{$this->pivotLocalKey}", $localId);
+            ->join($pivotConfig['table'], "{$pivotConfig['table']}.{$pivotConfig['foreign_column']} = {$this->relatedTable}.{$this->foreignKey}")
+            ->where("{$pivotConfig['table']}.{$pivotConfig['local_column']}", $localId);
     }
 
     /**
@@ -594,19 +587,21 @@ class EntityRelation
      */
     protected function updateBelongsMany(EntityInterface $localEntity, array|null|EntityInterface $relatedData): void
     {
-        $localId    = $this->getLocalId($localEntity);
-        $pivotTable = $this->registry->getPivotTable($localEntity->getAlias(), $this->relatedAlias);
+        $localId     = $this->getLocalId($localEntity);
+        $pivotConfig = $this->registry->getPivotConfig($localEntity->getAlias(), $this->relatedAlias);
 
-        if (empty($pivotTable)) {
-            throw new EntityException("Pivot table not defined for the {$this->relatedAlias} relation.");
+        if (empty($pivotConfig)) {
+            throw new EntityException("Pivot config not defined for the {$this->relatedAlias} relation.");
         }
 
-        $entities = is_array($relatedData) ? $relatedData : (empty($relatedData) ? [] : [$relatedData]);
+        // Trust resolver to format arrays, scalars, and entities consistently
+        $entities = empty($relatedData) ? [] : $this->resolveMany($relatedData);
         $newIds   = [];
 
         // Clean, readable loop without arrow functions
         foreach ($entities as $entity) {
-            $id = $entity instanceof EntityInterface ? $entity->getAttribute($this->relatedKey) : $entity;
+            // Because resolveMany strictly returns EntityInterface objects, we can simplify this too
+            $id = $entity->getAttribute($this->foreignKey);
 
             // Safely filter out nulls and empty strings, but keep valid integers
             if (!empty($id)) {
@@ -614,7 +609,7 @@ class EntityRelation
             }
         }
 
-        $this->relatedModel->sync($pivotTable, $this->pivotLocalKey, $this->pivotForeignKey, $localId, array_unique($newIds));
+        $this->relatedModel->syncPivot($pivotConfig['table'], $pivotConfig['local_column'], $pivotConfig['foreign_column'], $localId, array_unique($newIds));
     }
 
     /**
@@ -652,9 +647,11 @@ class EntityRelation
             return;
         }
 
-        $pivotTable = $this->registry->getPivotTable($localAlias, $this->relatedAlias);
+        $pivotConfig = $this->registry->getPivotConfig($localAlias, $this->relatedAlias);
 
-        $this->relatedModel->detach($pivotTable, $this->pivotLocalKey, $this->pivotForeignKey, $localId);
+        if (!empty($pivotConfig)) {
+            $this->relatedModel->detachPivot($pivotConfig['table'], $pivotConfig['local_column'], $pivotConfig['foreign_column'], $localId);
+        }
     }
 
     /**

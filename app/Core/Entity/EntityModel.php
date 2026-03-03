@@ -396,27 +396,6 @@ class EntityModel
         return $entity;
     }
 
-    /**
-     * Paginates results using CI4's Pager library.
-     * After calling this method, access $model->pager to render pagination links.
-     *
-     * @return EntityInterface[]
-     */
-    public function paginate(int $perPage = 20, string $group = 'default', int $page = 0): array
-    {
-        $page = max(1, $page ? : (int) $this->pager->getCurrentPage($group));
-
-        // countAllResults(false) runs COUNT(*) while preserving all WHERE/JOIN conditions
-        // so the subsequent findAll() applies the same filters with limit/offset added.
-        $total = $this->builder()->countAllResults(false);
-
-        $this->pager->store($group, $page, $perPage, $total);
-
-        $this->builder()->limit($perPage, ($page - 1) * $perPage);
-
-        return $this->findAll();
-    }
-
     public function save(EntityInterface $entity): bool
     {
         $id = $entity->getAttribute($this->primaryKey);
@@ -670,64 +649,30 @@ class EntityModel
         }
     }
 
-    public function attach(string $pivotTable, string $localKey, string $foreignKey, int|string $localId, array $relatedIds): void
-    {
-        if (empty($relatedIds)) {
-            return;
-        }
-
-        $insertData = [];
-
-        // Clean, readable loop instead of array_map with fn()
-        foreach ($relatedIds as $id) {
-            $insertData[] = [
-                $localKey   => $localId,
-                $foreignKey => $id
-            ];
-        }
-
-        // Uses a dedicated builder directly from the DB so we don't pollute the model's primary table builder
-        $this->db->table($pivotTable)->ignore(true)->insertBatch($insertData);
-    }
-
-    public function detach(string $pivotTable, string $localKey, string $foreignKey, int|string|array $localId, ?array $relatedIds = null): void
-    {
-        if (empty($localId)) {
-            return;
-        }
-
-        $query = is_array($localId)
-            ? $this->db->table($pivotTable)->whereIn($localKey, $localId)
-            : $this->db->table($pivotTable)->where($localKey, $localId);
-
-        if (!is_array($localId) && $relatedIds !== null) {
-            if (empty($relatedIds)) {
-                return;
-            }
-
-            $query->whereIn($foreignKey, $relatedIds);
-        }
-
-        $query->delete();
-    }
-
     /**
-     * Finds orphaned records matching a foreign key and detaches them natively,
-     * utilizing updateField() to ensure the Identity Map cache is perfectly purged.
+     * Paginates results using CI4's Pager library.
+     * After calling this method, access $model->pager to render pagination links.
+     *
+     * @return EntityInterface[]
      */
-    public function detachOrphans(string $foreignKey, int|string $localId, array $excludeIds = []): void
+    public function paginate(int $perPage = 20, string $group = 'default', int $page = 0): array
     {
-        $builder = $this->builder()->select($this->primaryKey)->where($foreignKey, $localId);
+        $page = max(1, $page ? : (int) $this->pager->getCurrentPage($group));
 
-        if (!empty($excludeIds)) {
-            $builder->whereNotIn($this->primaryKey, array_unique($excludeIds));
-        }
+        // countAllResults(false) runs COUNT(*) while preserving all WHERE/JOIN conditions
+        // so the subsequent findAll() applies the same filters with limit/offset added.
+        $total = $this->builder()->countAllResults(false);
 
-        $ids = array_column($builder->get()->getResultArray(), $this->primaryKey);
-        $this->newQuery();
+        $this->pager->store($group, $page, $perPage, $total);
 
-        // Pass the IDs to our generic update method to handle the DB write and cache purge!
-        $this->updateField($ids, $foreignKey, null);
+        $this->builder()->limit($perPage, ($page - 1) * $perPage);
+
+        return $this->findAll();
+    }
+
+    public function getPager(): PagerInterface
+    {
+        return $this->pager;
     }
 
     /**
@@ -758,35 +703,84 @@ class EntityModel
         return $result;
     }
 
-    public function sync(string $pivotTable, string $localKey, string $foreignKey, int|string $localId, array $relatedIds): void
+    public function syncPivot(string $pivotTable, string $localColumn, string $foreignColumn, int|string $localId, array $relatedIds): void
     {
         $currentRecords = $this->db->table($pivotTable)
-            ->select($foreignKey)
-            ->where($localKey, $localId)
+            ->select($foreignColumn)
+            ->where($localColumn, $localId)
             ->get()->getResultArray();
 
-        $currentIds = array_column($currentRecords, $foreignKey);
+        $currentIds = array_column($currentRecords, $foreignColumn);
 
         $idsToAttach = array_diff($relatedIds, $currentIds);
         $idsToDetach = array_diff($currentIds, $relatedIds);
 
-        $this->detach($pivotTable, $localKey, $foreignKey, $localId, $idsToDetach);
-        $this->attach($pivotTable, $localKey, $foreignKey, $localId, $idsToAttach);
+        $this->detachPivot($pivotTable, $localColumn, $foreignColumn, $localId, $idsToDetach);
+        $this->attachPivot($pivotTable, $localColumn, $foreignColumn, $localId, $idsToAttach);
     }
 
-    public function getTable(): string
+    public function attachPivot(string $pivotTable, string $localColumn, string $foreignColumn, int|string $localId, array $foreignIds): void
     {
-        return $this->table;
+        if (empty($foreignIds)) {
+            return;
+        }
+
+        $insertData = [];
+
+        // Clean, readable loop instead of array_map with fn()
+        foreach ($foreignIds as $id) {
+            $insertData[] = [
+                $localColumn   => $localId,
+                $foreignColumn => $id
+            ];
+        }
+
+        // Uses a dedicated builder directly from the DB so we don't pollute the model's primary table builder
+        $this->db->table($pivotTable)->ignore(true)->insertBatch($insertData);
     }
 
-    public function getPrimaryKey(): string
+    public function detachPivot(string $pivotTable, string $localColumn, string $foreignColumn, int|string|array $localId, ?array $foreignIds = null): void
     {
-        return $this->primaryKey;
+        if (empty($localId)) {
+            return;
+        }
+
+        $builder = $this->db->table($pivotTable);
+
+        if (is_array($localId)) {
+            $builder->whereIn($localColumn, $localId);
+        } else {
+            $builder->where($localColumn, $localId);
+        }
+
+        if (!is_array($localId) && $foreignIds !== null) {
+            if (empty($foreignIds)) {
+                return;
+            }
+
+            $builder->whereIn($foreignColumn, $foreignIds);
+        }
+
+        $builder->delete();
     }
 
-    public function getPager(): PagerInterface
+    /**
+     * Finds orphaned records matching a foreign key and detaches them natively,
+     * utilizing updateField() to ensure the Identity Map cache is perfectly purged.
+     */
+    public function detachOrphans(string $foreignKey, int|string $localId, array $excludeIds = []): void
     {
-        return $this->pager;
+        $builder = $this->builder()->select($this->primaryKey)->where($foreignKey, $localId);
+
+        if (!empty($excludeIds)) {
+            $builder->whereNotIn($this->primaryKey, array_unique($excludeIds));
+        }
+
+        $ids = array_column($builder->get()->getResultArray(), $this->primaryKey);
+        $this->newQuery();
+
+        // Pass the IDs to our generic update method to handle the DB write and cache purge!
+        $this->updateField($ids, $foreignKey, null);
     }
 
     /**

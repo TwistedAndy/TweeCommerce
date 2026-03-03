@@ -130,18 +130,27 @@ class EntityRegistry
 
     /**
      * Get the Pivot Table name
-     *
-     * @param string $localAlias
-     * @param string $relatedAlias
-     *
-     * @return string
      */
-    public function getPivotTable(string $localAlias, string $relatedAlias): string
+    public function getPivotConfig(string $localAlias, string $relatedAlias): array
     {
         $config = $this->getConfig($localAlias);
 
         if (empty($config['pivots']) or empty($config['pivots'][$relatedAlias])) {
-            return '';
+            return [];
+        }
+
+        $pivotConfig = $config['pivots'][$relatedAlias];
+
+        if (empty($pivotConfig['table'])) {
+            throw new EntityException('A pivot table is not specified for the ' . $localAlias . ' to ' . $relatedAlias . ' relation.');
+        }
+
+        if (empty($pivotConfig['local_column']) or !is_string($pivotConfig['local_column'])) {
+            throw new EntityException('A pivot foreign column is not specified for the ' . $localAlias . ' to ' . $relatedAlias . ' relation.');
+        }
+
+        if (empty($pivotConfig['foreign_column']) or !is_string($pivotConfig['foreign_column'])) {
+            throw new EntityException('A pivot foreign column is not specified for the ' . $localAlias . ' to ' . $relatedAlias . ' relation.');
         }
 
         return $config['pivots'][$relatedAlias];

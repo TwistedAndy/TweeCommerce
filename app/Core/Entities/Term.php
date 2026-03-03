@@ -33,10 +33,10 @@ class Term extends Entity
             'posts'    => [
                 'type'     => 'relation',
                 'relation' => [
-                    'type'              => 'belongs-many',
-                    'entity'            => 'post',
-                    'pivot_local_key'   => 'term_id',
-                    'pivot_foreign_key' => 'post_id'
+                    'type'        => 'belongs-many',
+                    'entity'      => 'post',
+                    'local_key'   => 'id',
+                    'foreign_key' => 'id'
                 ]
             ],
             'meta'     => [
