@@ -17,6 +17,8 @@ class EntityModel
     protected static array $identityMap      = [];
     protected static int   $identityMapLimit = 10000;
 
+    public readonly PagerInterface $pager;
+
     protected ?string        $DBGroup;
     protected ?BaseBuilder   $builder = null;
     protected BaseConnection $db;
@@ -27,7 +29,6 @@ class EntityModel
     protected string         $entityAlias;
     protected EntityFields   $entityFields;
     protected EntityRegistry $registry;
-    protected PagerInterface $pager;
 
     protected string $dateFormat   = 'U';
     protected string $deletedField = 'deleted_at';
@@ -355,7 +356,7 @@ class EntityModel
     {
         $builder = $this->builder();
 
-        $this->maybeExcludeDeleted($builder);
+        $this->handleDeleted($builder);
 
         $rows = $builder->get()->getResultArray();
 
@@ -374,7 +375,7 @@ class EntityModel
     {
         $builder = $this->builder();
 
-        $this->maybeExcludeDeleted($builder);
+        $this->handleDeleted($builder);
 
         $row = $builder->get()->getRowArray();
 
@@ -670,130 +671,25 @@ class EntityModel
         return $this->findAll();
     }
 
-    public function getPager(): PagerInterface
-    {
-        return $this->pager;
-    }
-
     /**
-     * Quickly update a specific field for one or more entity IDs directly in the database.
-     * Bypasses validation and entity lifecycle, but safely clears the Identity Map cache.
+     * Safely remove one or more entity IDs from this model's Identity Map cache.
      */
-    public function updateField(int|string|array $ids, string $field, mixed $value): bool
+    public function removeFromCache(int|string|array $ids): void
     {
-        if (empty($ids)) {
-            return true;
-        }
-
         if (!is_array($ids)) {
             $ids = [$ids];
         }
 
-        $builder = $this->builder();
-        $this->withDeleted(); // Ensure we can detach soft-deleted records if necessary
-
-        $result = $builder->whereIn($this->primaryKey, $ids)->update([$field => $value]);
-        $this->newQuery();
-
-        // Purge modified entities from the Identity Map so they reload fresh
         foreach ($ids as $id) {
             static::deleteFromIdentityMap($this->entityAlias . '_' . $id);
         }
-
-        return $result;
     }
 
-    public function syncPivot(string $pivotTable, string $localColumn, string $foreignColumn, int|string $localId, array $relatedIds): void
+    public function onlyDeleted(): void
     {
-        $currentRecords = $this->db->table($pivotTable)
-            ->select($foreignColumn)
-            ->where($localColumn, $localId)
-            ->get()->getResultArray();
-
-        $currentIds = array_column($currentRecords, $foreignColumn);
-
-        $idsToAttach = array_diff($relatedIds, $currentIds);
-        $idsToDetach = array_diff($currentIds, $relatedIds);
-
-        $this->detachPivot($pivotTable, $localColumn, $foreignColumn, $localId, $idsToDetach);
-        $this->attachPivot($pivotTable, $localColumn, $foreignColumn, $localId, $idsToAttach);
-    }
-
-    public function attachPivot(string $pivotTable, string $localColumn, string $foreignColumn, int|string $localId, array $foreignIds): void
-    {
-        if (empty($foreignIds)) {
-            return;
-        }
-
-        $insertData = [];
-
-        // Clean, readable loop instead of array_map with fn()
-        foreach ($foreignIds as $id) {
-            $insertData[] = [
-                $localColumn   => $localId,
-                $foreignColumn => $id
-            ];
-        }
-
-        // Uses a dedicated builder directly from the DB so we don't pollute the model's primary table builder
-        $this->db->table($pivotTable)->ignore(true)->insertBatch($insertData);
-    }
-
-    public function detachPivot(string $pivotTable, string $localColumn, string $foreignColumn, int|string|array $localId, ?array $foreignIds = null): void
-    {
-        if (empty($localId)) {
-            return;
-        }
-
-        $builder = $this->db->table($pivotTable);
-
-        if (is_array($localId)) {
-            $builder->whereIn($localColumn, $localId);
-        } else {
-            $builder->where($localColumn, $localId);
-        }
-
-        if (!is_array($localId) && $foreignIds !== null) {
-            if (empty($foreignIds)) {
-                return;
-            }
-
-            $builder->whereIn($foreignColumn, $foreignIds);
-        }
-
-        $builder->delete();
-    }
-
-    /**
-     * Finds orphaned records matching a foreign key and detaches them natively,
-     * utilizing updateField() to ensure the Identity Map cache is perfectly purged.
-     */
-    public function detachOrphans(string $foreignKey, int|string $localId, array $excludeIds = []): void
-    {
-        $builder = $this->builder()->select($this->primaryKey)->where($foreignKey, $localId);
-
-        if (!empty($excludeIds)) {
-            $builder->whereNotIn($this->primaryKey, array_unique($excludeIds));
-        }
-
-        $ids = array_column($builder->get()->getResultArray(), $this->primaryKey);
-        $this->newQuery();
-
-        // Pass the IDs to our generic update method to handle the DB write and cache purge!
-        $this->updateField($ids, $foreignKey, null);
-    }
-
-    /**
-     * Get records without trashed ones
-     */
-    public function maybeExcludeDeleted(?BaseBuilder $builder = null): void
-    {
-        if ($this->useSoftDeletes and $this->excludeDeleted) {
-            if ($builder === null) {
-                $builder = $this->builder();
-            }
-
-            $builder->where($this->table . '.' . $this->deletedField, null);
+        if ($this->useSoftDeletes) {
+            $this->builder()->where($this->table . '.' . $this->deletedField . ' IS NOT NULL');
+            $this->excludeDeleted = false;
         }
     }
 
@@ -802,11 +698,14 @@ class EntityModel
         $this->excludeDeleted = false;
     }
 
-    public function onlyDeleted(): void
+    public function handleDeleted(?BaseBuilder $builder = null): void
     {
-        if ($this->useSoftDeletes) {
-            $this->builder()->where($this->table . '.' . $this->deletedField . ' IS NOT NULL');
-            $this->excludeDeleted = false;
+        if ($this->useSoftDeletes and $this->excludeDeleted) {
+            if ($builder === null) {
+                $builder = $this->builder();
+            }
+
+            $builder->where($this->table . '.' . $this->deletedField, null);
         }
     }
 

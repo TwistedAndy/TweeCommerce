@@ -188,7 +188,7 @@ class EntityRelation
                 $pivotConfig = $this->registry->getPivotConfig($localAlias, $this->relatedAlias);
 
                 if (!empty($pivotConfig)) {
-                    $this->relatedModel->detachPivot($pivotConfig['table'], $pivotConfig['local_column'], $pivotConfig['foreign_column'], $localIds);
+                    $this->syncPivot($pivotConfig['table'], $pivotConfig['local_column'], $pivotConfig['foreign_column'], $localIds, []);
                 }
             }
 
@@ -257,7 +257,7 @@ class EntityRelation
         }
 
         // Strip out nulls and duplicates to prevent invalid WHERE IN queries
-        $localIds = array_filter($localIds);
+        $localIds = array_filter(array_unique($localIds));
 
         if (empty($localIds)) {
             return;
@@ -294,7 +294,7 @@ class EntityRelation
 
             $builder = $this->relatedModel->builder();
 
-            $this->relatedModel->maybeExcludeDeleted($builder);
+            $this->relatedModel->handleDeleted($builder);
 
             $builder
                 ->select("{$this->relatedTable}.*, {$pivotConfig['table']}.{$pivotConfig['local_column']} AS __pivot_local_key")
@@ -334,7 +334,7 @@ class EntityRelation
 
         $builder = $this->relatedModel->builder();
 
-        $this->relatedModel->maybeExcludeDeleted($builder);
+        $this->relatedModel->handleDeleted($builder);
 
         if ($this->constraint) {
             $this->applyConstraints($builder);
@@ -515,15 +515,14 @@ class EntityRelation
             $entity->setAttribute($this->foreignKey, $localId);
             $this->relatedModel->save($entity);
 
-            $entityId = $entity->getAttribute($this->relatedKey);
+            $entityId   = $entity->getAttribute($this->relatedKey);
+            $excludeIds = empty($entityId) ? [] : [$entityId];
 
             // Detach any OLD orphans, strictly excluding the one we just saved
-            $excludeIds = empty($entityId) ? [] : [$entityId];
-            $this->relatedModel->detachOrphans($this->foreignKey, $localId, $excludeIds);
-
+            $this->detachOrphans($this->foreignKey, $localId, $excludeIds);
         } else {
             // If null/empty was passed, intentionally detach everything
-            $this->relatedModel->detachOrphans($this->foreignKey, $localId);
+            $this->detachOrphans($this->foreignKey, $localId);
         }
     }
 
@@ -538,7 +537,7 @@ class EntityRelation
 
         // If empty array, detach everything and exit
         if (empty($relatedData)) {
-            $this->relatedModel->detachOrphans($this->foreignKey, $localId);
+            $this->detachOrphans($this->foreignKey, $localId);
             return;
         }
 
@@ -556,8 +555,7 @@ class EntityRelation
             }
         }
 
-        // Detach ONLY the children that are not in our new list
-        $this->relatedModel->detachOrphans($this->foreignKey, $localId, $entityIds);
+        $this->detachOrphans($this->foreignKey, $localId, $entityIds);
     }
 
     /**
@@ -609,7 +607,7 @@ class EntityRelation
             }
         }
 
-        $this->relatedModel->syncPivot($pivotConfig['table'], $pivotConfig['local_column'], $pivotConfig['foreign_column'], $localId, array_unique($newIds));
+        $this->syncPivot($pivotConfig['table'], $pivotConfig['local_column'], $pivotConfig['foreign_column'], $localId, array_unique($newIds));
     }
 
     /**
@@ -650,7 +648,7 @@ class EntityRelation
         $pivotConfig = $this->registry->getPivotConfig($localAlias, $this->relatedAlias);
 
         if (!empty($pivotConfig)) {
-            $this->relatedModel->detachPivot($pivotConfig['table'], $pivotConfig['local_column'], $pivotConfig['foreign_column'], $localId);
+            $this->syncPivot($pivotConfig['table'], $pivotConfig['local_column'], $pivotConfig['foreign_column'], $localId, []);
         }
     }
 
@@ -755,5 +753,92 @@ class EntityRelation
         }
 
         return $entities;
+    }
+
+    /**
+     * Finds orphaned records matching a foreign key and detaches them natively,
+     * then commands the related model to clear them from its cache.
+     */
+    protected function detachOrphans(string $foreignKey, int|string $localId, array $excludeIds = []): void
+    {
+        $builder = $this->relatedModel->builder()->select($this->relatedKey)->where($foreignKey, $localId);
+
+        if (!empty($excludeIds)) {
+            $builder->whereNotIn($this->relatedKey, array_unique($excludeIds));
+        }
+
+        $orphans = $builder->get()->getResultArray();
+        $this->relatedModel->newQuery();
+
+        if (empty($orphans)) {
+            return;
+        }
+
+        $orphanIds = array_column($orphans, $this->relatedKey);
+
+        $this->relatedModel->builder()
+            ->whereIn($this->relatedKey, $orphanIds)
+            ->update([$foreignKey => null]);
+
+        $this->relatedModel->newQuery();
+
+        // Purge the modified orphans from the Identity Map!
+        $this->relatedModel->removeFromCache($orphanIds);
+    }
+
+    /**
+     * Synchronize or detach pivot records.
+     * Passing an empty $foreignIds array will detach all records for the given $localId(s).
+     */
+    protected function syncPivot(string $pivotTable, string $localColumn, string $foreignColumn, int|string|array $localId, array $foreignIds = []): void
+    {
+        if (empty($localId)) {
+            return;
+        }
+
+        $builder = $this->relatedModel->builder($pivotTable);
+
+        // 1. If no foreign IDs are provided, this acts as a full detach
+        if (empty($foreignIds)) {
+            is_array($localId) ? $builder->whereIn($localColumn, $localId) : $builder->where($localColumn, $localId);
+            $builder->delete();
+            $this->relatedModel->newQuery();
+            return;
+        }
+
+        // 2. Fetch current pivot relationships
+        $currentRecords = $builder->select($foreignColumn)
+            ->where($localColumn, $localId)
+            ->get()->getResultArray();
+
+        $this->relatedModel->newQuery();
+
+        $currentIds = array_column($currentRecords, $foreignColumn);
+
+        // 3. Diff arrays to find what needs to be added or removed
+        $idsToDetach = array_diff($currentIds, $foreignIds);
+        $idsToAttach = array_diff($foreignIds, $currentIds);
+
+        // 4. Detach old IDs
+        if (!empty($idsToDetach)) {
+            $this->relatedModel->builder($pivotTable)
+                ->where($localColumn, $localId)
+                ->whereIn($foreignColumn, $idsToDetach)
+                ->delete();
+            $this->relatedModel->newQuery();
+        }
+
+        // 5. Attach new IDs
+        if (!empty($idsToAttach)) {
+            $insertData = [];
+            foreach ($idsToAttach as $id) {
+                $insertData[] = [
+                    $localColumn   => $localId,
+                    $foreignColumn => $id
+                ];
+            }
+            $this->relatedModel->builder($pivotTable)->ignore(true)->insertBatch($insertData);
+            $this->relatedModel->newQuery();
+        }
     }
 }
