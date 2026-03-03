@@ -202,7 +202,7 @@ class EntityRelation
             ->whereIn($this->foreignKey, $localIds)
             ->get()->getResultArray();
 
-        $this->relatedModel->newQuery();
+        $this->relatedModel->reset();
 
         $ids = array_column($rows, $this->relatedKey);
 
@@ -231,7 +231,7 @@ class EntityRelation
             ->whereIn($this->foreignKey, $localIds)
             ->get()->getResultArray();
 
-        $this->relatedModel->newQuery();
+        $this->relatedModel->reset();
 
         $ids = array_column($rows, $this->relatedKey);
 
@@ -294,7 +294,7 @@ class EntityRelation
 
             $builder = $this->relatedModel->builder();
 
-            $this->relatedModel->handleDeleted($builder);
+            $this->relatedModel->handleDeleted();
 
             $builder
                 ->select("{$this->relatedTable}.*, {$pivotConfig['table']}.{$pivotConfig['local_column']} AS __pivot_local_key")
@@ -311,7 +311,7 @@ class EntityRelation
 
             $rows = $builder->get()->getResultArray();
 
-            $this->relatedModel->newQuery();
+            $this->relatedModel->reset();
 
             $relatedByParentId = [];
 
@@ -334,7 +334,7 @@ class EntityRelation
 
         $builder = $this->relatedModel->builder();
 
-        $this->relatedModel->handleDeleted($builder);
+        $this->relatedModel->handleDeleted();
 
         if ($this->constraint) {
             $this->applyConstraints($builder);
@@ -346,7 +346,7 @@ class EntityRelation
 
         $relatedRecords = $builder->whereIn($keyToMatch, $localIds)->get()->getResultArray();
 
-        $this->relatedModel->newQuery();
+        $this->relatedModel->reset();
 
         $relatedEntities = [];
         foreach ($relatedRecords as $row) {
@@ -768,7 +768,7 @@ class EntityRelation
         }
 
         $orphans = $builder->get()->getResultArray();
-        $this->relatedModel->newQuery();
+        $this->relatedModel->reset();
 
         if (empty($orphans)) {
             return;
@@ -780,7 +780,7 @@ class EntityRelation
             ->whereIn($this->relatedKey, $orphanIds)
             ->update([$foreignKey => null]);
 
-        $this->relatedModel->newQuery();
+        $this->relatedModel->reset();
 
         // Purge the modified orphans from the Identity Map!
         $this->relatedModel->removeFromCache($orphanIds);
@@ -802,7 +802,7 @@ class EntityRelation
         if (empty($foreignIds)) {
             is_array($localId) ? $builder->whereIn($localColumn, $localId) : $builder->where($localColumn, $localId);
             $builder->delete();
-            $this->relatedModel->newQuery();
+            $this->relatedModel->reset();
             return;
         }
 
@@ -811,7 +811,7 @@ class EntityRelation
             ->where($localColumn, $localId)
             ->get()->getResultArray();
 
-        $this->relatedModel->newQuery();
+        $this->relatedModel->reset();
 
         $currentIds = array_column($currentRecords, $foreignColumn);
 
@@ -825,7 +825,7 @@ class EntityRelation
                 ->where($localColumn, $localId)
                 ->whereIn($foreignColumn, $idsToDetach)
                 ->delete();
-            $this->relatedModel->newQuery();
+            $this->relatedModel->reset();
         }
 
         // 5. Attach new IDs
@@ -838,7 +838,7 @@ class EntityRelation
                 ];
             }
             $this->relatedModel->builder($pivotTable)->ignore(true)->insertBatch($insertData);
-            $this->relatedModel->newQuery();
+            $this->relatedModel->reset();
         }
     }
 }

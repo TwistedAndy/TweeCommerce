@@ -43,7 +43,7 @@ class MetaModel extends EntityModel
 
         $rows = $this->builder()->where($this->metaEntityColumn, $id)->get()->getResultArray();
 
-        $this->newQuery();
+        $this->reset();
 
         return $this->hydrateRows($rows, $id);
     }
@@ -56,7 +56,7 @@ class MetaModel extends EntityModel
 
         $rows = $this->builder()->whereIn($this->metaEntityColumn, $ids)->get()->getResultArray();
 
-        $this->newQuery();
+        $this->reset();
 
         $grouped = [];
 
@@ -85,7 +85,7 @@ class MetaModel extends EntityModel
     {
         $rows = $this->builder()->get()->getResultArray();
 
-        $this->newQuery();
+        $this->reset();
 
         $grouped = [];
 
@@ -109,7 +109,7 @@ class MetaModel extends EntityModel
         // Find the first matching entity ID based on current builder conditions
         $firstRow = $this->builder()->select($this->metaEntityColumn)->limit(1)->get()->getRowArray();
 
-        $this->newQuery();
+        $this->reset();
 
         if (empty($firstRow) or empty($firstRow[$this->metaEntityColumn])) {
             return null;

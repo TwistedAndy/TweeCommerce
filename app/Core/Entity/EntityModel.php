@@ -2,10 +2,10 @@
 
 namespace App\Core\Entity;
 
+use BadMethodCallException;
+use CodeIgniter\Pager\PagerInterface;
 use CodeIgniter\Database\BaseConnection;
 use CodeIgniter\Database\BaseBuilder;
-use CodeIgniter\Pager\PagerInterface;
-use BadMethodCallException;
 use CodeIgniter\Validation\ValidationInterface;
 
 /**
@@ -21,7 +21,7 @@ class EntityModel
     public readonly PagerInterface $pager;
 
     protected ?string        $DBGroup;
-    protected ?BaseBuilder   $builder = null;
+    protected BaseBuilder    $builder;
     protected BaseConnection $db;
 
     protected string         $table;
@@ -44,12 +44,11 @@ class EntityModel
 
     protected ValidationInterface $validator;
 
-    protected array $allowedFields        = [];
-    protected array $relationFields       = [];
-    protected array $validationRules      = [];
-    protected array $validationErrors     = [];
-    protected bool  $cleanValidationRules = true;
-    protected bool  $skipValidation       = false;
+    protected array $allowedFields    = [];
+    protected array $relationFields   = [];
+    protected array $validationRules  = [];
+    protected array $validationErrors = [];
+    protected bool  $skipValidation   = false;
 
     public function __construct(string $alias, EntityRegistry $registry, ValidationInterface $validator, PagerInterface $pager)
     {
@@ -71,8 +70,9 @@ class EntityModel
 
         $this->DBGroup = $registry->getDatabaseGroup($alias);
 
-        $this->db    = \Config\Database::connect($this->DBGroup);
-        $this->table = $registry->getEntityTable($alias);
+        $this->db      = \Config\Database::connect($this->DBGroup);
+        $this->table   = $registry->getEntityTable($alias);
+        $this->builder = $this->db->table($this->table);
 
         $this->validator    = $validator;
         $this->primaryKey   = $entityFields->getPrimaryKey();
@@ -152,40 +152,27 @@ class EntityModel
 
     public function __invoke(): BaseBuilder
     {
-        return $this->builder();
+        return $this->builder;
     }
 
     /**
      * Proxies missing methods directly to the native CI4 Query Builder.
+     *
+     * @return $this|array<int|string, mixed>|BaseBuilder|bool|float|int|object|string|null
      */
     public function __call(string $name, array $params)
     {
-        $builder = $this->builder();
-
-        if (method_exists($builder, $name)) {
-            $result = $builder->{$name}(...$params);
-
-            if ($result instanceof BaseBuilder) {
-                return $this;
-            }
-
-            $this->builder = null;
-            return $result;
+        if (method_exists($this->builder, $name)) {
+            $result = $this->builder->{$name}(...$params);
+        } else {
+            throw new BadMethodCallException('Call to undefined method ' . static::class . '::' . $name);
         }
 
-        throw new BadMethodCallException("Method {$name} does not exist on EntityModel or BaseBuilder.");
-    }
+        if ($result instanceof BaseBuilder) {
+            return $this;
+        }
 
-    /**
-     * Explicitly discard any pending builder conditions and start a clean query.
-     * Use this when reusing a model instance across multiple independent queries.
-     */
-    public function newQuery(): self
-    {
-        $this->builder        = null;
-        $this->withRelations  = [];
-        $this->excludeDeleted = true;
-        return $this;
+        return $result;
     }
 
     /**
@@ -193,13 +180,11 @@ class EntityModel
      */
     public function builder(?string $table = null): BaseBuilder
     {
-        $targetTable = $table ?? $this->table;
-
-        if ($this->builder === null or $this->builder->getTable() !== $targetTable) {
-            $this->builder = $this->db->table($targetTable);
+        if ($table === null or $table === $this->table) {
+            return $this->builder;
         }
 
-        return $this->builder;
+        return $this->db->table($table);
     }
 
     /**
@@ -220,7 +205,7 @@ class EntityModel
         }
 
         // Apply condition natively to the builder, then explicitly call the model's first() method
-        $this->builder()->where($this->primaryKey, $id);
+        $this->builder->where($this->primaryKey, $id);
 
         return $this->first();
     }
@@ -238,12 +223,10 @@ class EntityModel
             return [];
         }
 
-        $builder = $this->builder();
-
         // Do not cache the relations
         if (!empty($this->withRelations)) {
             // Apply condition natively to the builder, then explicitly call the model's findAll() method
-            $builder->whereIn($this->primaryKey, $ids);
+            $this->builder->whereIn($this->primaryKey, $ids);
             return $this->findAll();
         }
 
@@ -263,7 +246,7 @@ class EntityModel
 
         if ($missingIds) {
 
-            $this->builder()->whereIn($this->primaryKey, $missingIds);
+            $this->builder->whereIn($this->primaryKey, $missingIds);
 
             $foundEntities = $this->findAll();
 
@@ -293,11 +276,9 @@ class EntityModel
      */
     public function findAll(): array
     {
-        $builder = $this->builder();
+        $this->handleDeleted();
 
-        $this->handleDeleted($builder);
-
-        $rows = $builder->get()->getResultArray();
+        $rows = $this->builder->get()->getResultArray();
 
         $entities = array_map([$this, 'hydrateRow'], $rows);
 
@@ -305,20 +286,16 @@ class EntityModel
             $this->loadRelations($entities);
         }
 
-        $this->newQuery();
+        $this->reset();
 
         return $entities;
     }
 
     public function first(): ?EntityInterface
     {
-        $builder = $this->builder();
+        $this->handleDeleted();
 
-        $this->handleDeleted($builder);
-
-        $row = $builder->get()->getRowArray();
-
-        $this->builder = null;
+        $row = $this->builder->get()->getRowArray();
 
         if (!$row) {
             $this->withRelations = []; // Clear eager load queue if no result
@@ -331,7 +308,7 @@ class EntityModel
             $this->loadRelations([$entity]);
         }
 
-        $this->newQuery();
+        $this->reset();
 
         return $entity;
     }
@@ -339,22 +316,15 @@ class EntityModel
     public function save(EntityInterface $entity): bool
     {
         $id = $entity->getAttribute($this->primaryKey);
-        return (empty($id)) ? $this->insert($entity) : $this->update($id, $entity);
+
+        return empty($id) ? $this->insert($entity) : $this->update($id, $entity);
     }
 
     public function insert(EntityInterface $entity): bool
     {
-        // Inserts must validate all rules, so we temporarily enforce strict validation
-        $cleanRules = $this->cleanValidationRules;
-
-        $this->cleanValidationRules = false;
-
-        if (!$this->validate($entity)) {
-            $this->cleanValidationRules = $cleanRules;
+        if (!$this->validate($entity, false)) {
             return false;
         }
-
-        $this->cleanValidationRules = $cleanRules;
 
         $useTransaction = count($this->entityFields->getRelations()) > 0;
 
@@ -381,8 +351,9 @@ class EntityModel
                 return false;
             }
 
-            $success = $this->builder()->insert($data);
-            $this->newQuery();
+            $success = $this->builder->insert($data);
+
+            $this->reset();
 
             if (!$success) {
                 if ($useTransaction) {
@@ -422,11 +393,9 @@ class EntityModel
             return true;
         }
 
-        // For updates, we validate only the changes if cleanRules is active,
-        // allowing partial updates to pass validation seamlessly.
-        $dataToValidate = $this->cleanValidationRules ? $entity->getChanges() : $entity;
+        $data = $entity->getChanges();
 
-        if (!$this->validate($dataToValidate)) {
+        if (!$this->validate($data, true)) {
             return false;
         }
 
@@ -451,15 +420,12 @@ class EntityModel
             $changes = array_intersect_key($changes, $this->allowedFields);
 
             if (!empty($changes)) {
-                $builder = $this->builder();
-
                 $this->withDeleted();
 
-                $builder->where($this->primaryKey, $id);
-                $builder->update($changes);
+                $this->builder->where($this->primaryKey, $id)->update($changes);
             }
 
-            $this->newQuery();
+            $this->reset();
 
             // Post-Save Relations
             if ($this->relationFields) {
@@ -508,17 +474,15 @@ class EntityModel
         try {
             $this->runCascadeDelete($ids, $purge or !$this->useSoftDeletes);
 
-            $builder = $this->builder();
-
             $this->withDeleted();
 
-            $builder->whereIn($this->primaryKey, $ids);
+            $this->builder->whereIn($this->primaryKey, $ids);
 
             $result = (!$purge and $this->useSoftDeletes)
-                ? $builder->update([$this->deletedField => $this->formatTimestamp(time())])
-                : $builder->delete();
+                ? $this->builder->update([$this->deletedField => $this->formatTimestamp(time())])
+                : $this->builder->delete();
 
-            $this->newQuery();
+            $this->reset();
 
             $this->removeFromCache($ids);
 
@@ -560,14 +524,12 @@ class EntityModel
         try {
             $this->runCascadeRestore($ids);
 
-            $builder = $this->builder();
-
             $this->withDeleted();
 
-            $builder->whereIn($this->primaryKey, $ids);
-            $result = $builder->update([$this->deletedField => null]);
+            $this->builder->whereIn($this->primaryKey, $ids);
+            $result = $this->builder->update([$this->deletedField => null]);
 
-            $this->newQuery();
+            $this->reset();
 
             $this->removeFromCache($ids);
 
@@ -586,6 +548,18 @@ class EntityModel
     }
 
     /**
+     * Explicitly discard any pending builder conditions and start a clean query.
+     */
+    public function reset(): self
+    {
+        $this->builder->resetQuery();
+        $this->withRelations  = [];
+        $this->excludeDeleted = true;
+
+        return $this;
+    }
+
+    /**
      * Paginates results using CI4's Pager library.
      * After calling this method, access $model->pager to render pagination links.
      *
@@ -597,37 +571,39 @@ class EntityModel
 
         // countAllResults(false) runs COUNT(*) while preserving all WHERE/JOIN conditions
         // so the subsequent findAll() applies the same filters with limit/offset added.
-        $total = $this->builder()->countAllResults(false);
+        $total = $this->builder->countAllResults(false);
 
         $this->pager->store($group, $page, $perPage, $total);
 
-        $this->builder()->limit($perPage, ($page - 1) * $perPage);
+        $this->builder->limit($perPage, ($page - 1) * $perPage);
 
         return $this->findAll();
     }
 
-    public function onlyDeleted(): void
+    public function onlyDeleted(): self
     {
         if ($this->useSoftDeletes) {
-            $this->builder()->where($this->table . '.' . $this->deletedField . ' IS NOT NULL');
+            $this->builder->where($this->table . '.' . $this->deletedField . ' IS NOT NULL');
             $this->excludeDeleted = false;
         }
+
+        return $this;
     }
 
-    public function withDeleted(): void
+    public function withDeleted(): self
     {
         $this->excludeDeleted = false;
+
+        return $this;
     }
 
-    public function handleDeleted(?BaseBuilder $builder = null): void
+    public function handleDeleted(): self
     {
         if ($this->useSoftDeletes and $this->excludeDeleted) {
-            if ($builder === null) {
-                $builder = $this->builder();
-            }
-
-            $builder->where($this->table . '.' . $this->deletedField, null);
+            $this->builder->where($this->table . '.' . $this->deletedField, null);
         }
+
+        return $this;
     }
 
     public function hydrateRow(array $row): EntityInterface
@@ -648,24 +624,6 @@ class EntityModel
     }
 
     /**
-     * Set the value of the $skipValidation flag.
-     */
-    public function skipValidation(bool $skip = true): self
-    {
-        $this->skipValidation = $skip;
-        return $this;
-    }
-
-    /**
-     * Should validation rules be removed for fields that aren't present?
-     */
-    public function cleanRules(bool $choice = true): self
-    {
-        $this->cleanValidationRules = $choice;
-        return $this;
-    }
-
-    /**
      * Get the validation errors from the last failed save.
      */
     public function errors(): array
@@ -676,7 +634,7 @@ class EntityModel
     /**
      * Validate the Entity or raw data array against the parsed rules.
      */
-    public function validate(EntityInterface|array $data): bool
+    public function validate(EntityInterface|array $data, $skipMissing = false): bool
     {
         if ($this->skipValidation or empty($this->validationRules)) {
             return true;
@@ -684,9 +642,15 @@ class EntityModel
 
         $row = $data instanceof EntityInterface ? $data->getAttributes() : $data;
 
-        $rules = $this->cleanValidationRules
-            ? $this->cleanValidationRules($this->validationRules, $row)
-            : $this->validationRules;
+        $rules = $this->validationRules;
+
+        if ($skipMissing) {
+            foreach (array_keys($rules) as $field) {
+                if (!array_key_exists($field, $row)) {
+                    unset($rules[$field]);
+                }
+            }
+        }
 
         // If no data existed that needs validation, we're good to go.
         if (empty($rules)) {
@@ -702,6 +666,16 @@ class EntityModel
 
         $this->validationErrors = [];
         return true;
+    }
+
+    /**
+     * Set the value of the $skipValidation flag.
+     */
+    public function skipValidation(bool $skip = true): self
+    {
+        $this->skipValidation = $skip;
+
+        return $this;
     }
 
     /**
@@ -767,83 +741,6 @@ class EntityModel
     }
 
     /**
-     * Removes any rules that apply to fields that have not been set
-     * so that rules don't block updating when doing a partial update.
-     */
-    protected function cleanValidationRules(array $rules, array $row): array
-    {
-        if (empty($row)) {
-            return [];
-        }
-
-        foreach (array_keys($rules) as $field) {
-            if (!array_key_exists($field, $row)) {
-                unset($rules[$field]);
-            }
-        }
-
-        return $rules;
-    }
-
-    /**
-     * Format a Unix timestamp using the model's configured date format.
-     * Mirrors the same conversion the entity cast applies in insert() and update().
-     */
-    protected function formatTimestamp(int $time): int|string
-    {
-        return match ($this->dateFormat) {
-            'datetime' => date('Y-m-d H:i:s', $time),
-            'date' => date('Y-m-d', $time),
-            default => $time,
-        };
-    }
-
-    protected function loadRelations(array $entities): void
-    {
-        $relations = $this->withRelations;
-
-        $this->withRelations = [];
-
-        if (empty($relations) or empty($entities)) {
-            return;
-        }
-
-        foreach ($relations as $relationName) {
-            if (!empty($this->relationFields[$relationName])) {
-                $this->entityFields->getRelation($relationName)->eagerLoad($entities);
-            }
-        }
-    }
-
-    /**
-     * Run cascade delete/soft-delete for all relations that have cascade => true.
-     */
-    protected function runCascadeDelete(array $ids, bool $purge): void
-    {
-        foreach ($this->relationFields as $key => $flag) {
-            $relation = $this->entityFields->getRelation($key);
-
-            if ($relation->isCascade()) {
-                $relation->cascadeDelete($ids, $this->entityAlias, $purge);
-            }
-        }
-    }
-
-    /**
-     * Run cascade restore for all relations that have cascade => true.
-     */
-    protected function runCascadeRestore(array $ids): void
-    {
-        foreach ($this->relationFields as $key => $flag) {
-            $relation = $this->entityFields->getRelation($key);
-
-            if ($relation->isCascade()) {
-                $relation->cascadeRestore($ids);
-            }
-        }
-    }
-
-    /**
      * Save the entity relations
      */
     protected function saveRelations(EntityInterface $entity): void
@@ -885,5 +782,66 @@ class EntityModel
                 $this->entityFields->getRelation($field)->update($entity, $value);
             }
         }
+    }
+
+    /**
+     * Eagerly load the relation data for entities
+     */
+    protected function loadRelations(array $entities): void
+    {
+        $relations = $this->withRelations;
+
+        $this->withRelations = [];
+
+        if (empty($relations) or empty($entities)) {
+            return;
+        }
+
+        foreach ($relations as $relationName) {
+            if (!empty($this->relationFields[$relationName])) {
+                $this->entityFields->getRelation($relationName)->eagerLoad($entities);
+            }
+        }
+    }
+
+    /**
+     * Run cascade delete for all relations that have cascade => true.
+     */
+    protected function runCascadeDelete(array $ids, bool $purge): void
+    {
+        foreach ($this->relationFields as $key => $flag) {
+            $relation = $this->entityFields->getRelation($key);
+
+            if ($relation->isCascade()) {
+                $relation->cascadeDelete($ids, $this->entityAlias, $purge);
+            }
+        }
+    }
+
+    /**
+     * Run cascade restore for all relations that have cascade => true.
+     */
+    protected function runCascadeRestore(array $ids): void
+    {
+        foreach ($this->relationFields as $key => $flag) {
+            $relation = $this->entityFields->getRelation($key);
+
+            if ($relation->isCascade()) {
+                $relation->cascadeRestore($ids);
+            }
+        }
+    }
+
+    /**
+     * Format a Unix timestamp using the model's configured date format.
+     * Mirrors the same conversion the entity cast applies in insert() and update().
+     */
+    protected function formatTimestamp(int $time): int|string
+    {
+        return match ($this->dateFormat) {
+            'datetime' => date('Y-m-d H:i:s', $time),
+            'date' => date('Y-m-d', $time),
+            default => $time,
+        };
     }
 }
