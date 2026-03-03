@@ -14,8 +14,9 @@ use CodeIgniter\Validation\ValidationInterface;
  */
 class EntityModel
 {
-    protected static array $identityMap      = [];
-    protected static int   $identityMapLimit = 10000;
+    protected static array $identityMap = [];
+
+    protected int $cacheLimit = 10000;
 
     public readonly PagerInterface $pager;
 
@@ -50,70 +51,6 @@ class EntityModel
     protected bool  $cleanValidationRules = true;
     protected bool  $skipValidation       = false;
 
-    /**
-     * Configure the maximum number of records held in the Identity Map.
-     */
-    public static function setIdentityMapLimit(int $limit): void
-    {
-        static::$identityMapLimit = $limit;
-    }
-
-    /**
-     * Get an entity from the map and mark it as recently used (LRU).
-     */
-    protected static function getFromIdentityMap(string $key): ?EntityInterface
-    {
-        if (isset(static::$identityMap[$key])) {
-            $entity = static::$identityMap[$key];
-
-            // Move to the end of the array
-            unset(static::$identityMap[$key]);
-            static::$identityMap[$key] = $entity;
-
-            return $entity;
-        }
-
-        return null;
-    }
-
-    /**
-     * Add an entity to the map and enforce the LRU limit.
-     */
-    protected static function addToIdentityMap(string $key, EntityInterface $entity): void
-    {
-        // If it exists, unset it first so it moves to the end of the array
-        if (isset(static::$identityMap[$key])) {
-            unset(static::$identityMap[$key]);
-        }
-
-        static::$identityMap[$key] = $entity;
-
-        // Enforce the size limit (if limit is greater than 0)
-        if (static::$identityMapLimit > 0 && count(static::$identityMap) > static::$identityMapLimit) {
-            // array_key_first() is O(1) performance. Drops the oldest, least recently used record.
-            $oldestKey = array_key_first(static::$identityMap);
-            if ($oldestKey !== null) {
-                unset(static::$identityMap[$oldestKey]);
-            }
-        }
-    }
-
-    /**
-     * Remove an entity from the map.
-     */
-    protected static function deleteFromIdentityMap(string $key): void
-    {
-        unset(static::$identityMap[$key]);
-    }
-
-    /**
-     * Clean the identity cache
-     */
-    public static function clearIdentityMap(): void
-    {
-        static::$identityMap = [];
-    }
-
     public function __construct(string $alias, EntityRegistry $registry, ValidationInterface $validator, PagerInterface $pager)
     {
         $entityFields = $registry->getEntityFields($alias);
@@ -127,6 +64,10 @@ class EntityModel
         $this->entityFields = $entityFields;
         $this->registry     = $registry;
         $this->pager        = $pager;
+
+        if (!isset(static::$identityMap[$this->entityAlias])) {
+            static::$identityMap[$this->entityAlias] = [];
+        }
 
         $this->DBGroup = $registry->getDatabaseGroup($alias);
 
@@ -272,10 +213,10 @@ class EntityModel
 
     public function find(int|string $id): ?EntityInterface
     {
-        $cacheKey = $this->entityAlias . '_' . $id;
+        $entity = $this->getFromCache($id);
 
-        if (isset(static::$identityMap[$cacheKey])) {
-            return static::getFromIdentityMap($cacheKey);
+        if ($entity !== null) {
+            return $entity;
         }
 
         // Apply condition natively to the builder, then explicitly call the model's first() method
@@ -308,13 +249,11 @@ class EntityModel
 
         $missingIds = [];
 
-        $exitingEntities = [];
+        $existingEntities = [];
 
         foreach ($ids as $id) {
-            $cacheKey = $this->entityAlias . '_' . $id;
-
-            if (isset(static::$identityMap[$cacheKey])) {
-                $exitingEntities[$id] = static::getFromIdentityMap($cacheKey);
+            if ($cached = $this->getFromCache($id)) {
+                $existingEntities[$id] = $cached;
             } else {
                 $missingIds[] = $id;
             }
@@ -330,18 +269,18 @@ class EntityModel
 
             if ($foundEntities) {
                 foreach ($foundEntities as $entity) {
-                    $exitingEntities[$entity->getAttribute($this->primaryKey)] = $entity;
+                    $existingEntities[$entity->getAttribute($this->primaryKey)] = $entity;
                 }
             }
 
             // Reorder the entities
             foreach ($ids as $id) {
-                if (isset($exitingEntities[$id])) {
-                    $entities[$id] = $exitingEntities[$id];
+                if (isset($existingEntities[$id])) {
+                    $entities[$id] = $existingEntities[$id];
                 }
             }
         } else {
-            $entities = $exitingEntities;
+            $entities = $existingEntities;
         }
 
         return array_values($entities);
@@ -462,7 +401,7 @@ class EntityModel
 
             $entity->flushChanges();
 
-            static::addToIdentityMap($this->entityAlias . '_' . $insertId, $entity);
+            $this->addToCache($insertId, $entity);
 
             if ($useTransaction) {
                 $this->db->transCommit();
@@ -529,7 +468,7 @@ class EntityModel
 
             $entity->flushChanges();
 
-            static::addToIdentityMap($this->entityAlias . '_' . $id, $entity);
+            $this->addToCache($id, $entity);
 
             if ($useTransaction) {
                 $this->db->transCommit();
@@ -581,9 +520,7 @@ class EntityModel
 
             $this->newQuery();
 
-            foreach ($ids as $singleId) {
-                static::deleteFromIdentityMap($this->entityAlias . '_' . $singleId);
-            }
+            $this->removeFromCache($ids);
 
             if ($useTransaction) {
                 $this->db->transCommit();
@@ -632,9 +569,7 @@ class EntityModel
 
             $this->newQuery();
 
-            foreach ($ids as $singleId) {
-                static::deleteFromIdentityMap($this->entityAlias . '_' . $singleId);
-            }
+            $this->removeFromCache($ids);
 
             if ($useTransaction) {
                 $this->db->transCommit();
@@ -671,20 +606,6 @@ class EntityModel
         return $this->findAll();
     }
 
-    /**
-     * Safely remove one or more entity IDs from this model's Identity Map cache.
-     */
-    public function removeFromCache(int|string|array $ids): void
-    {
-        if (!is_array($ids)) {
-            $ids = [$ids];
-        }
-
-        foreach ($ids as $id) {
-            static::deleteFromIdentityMap($this->entityAlias . '_' . $id);
-        }
-    }
-
     public function onlyDeleted(): void
     {
         if ($this->useSoftDeletes) {
@@ -712,16 +633,15 @@ class EntityModel
     public function hydrateRow(array $row): EntityInterface
     {
         $entityId = $row[$this->primaryKey] ?? null;
-        $cacheKey = $this->entityAlias . '_' . $entityId;
 
-        if (isset(static::$identityMap[$cacheKey])) {
-            return static::getFromIdentityMap($cacheKey);
+        if ($entityId !== null and $cached = $this->getFromCache($entityId)) {
+            return $cached;
         }
 
         $entity = new $this->entityClass($row, $this->entityAlias, $this->entityFields);
 
         if (!empty($entityId)) {
-            static::addToIdentityMap($cacheKey, $entity);
+            $this->addToCache($entityId, $entity);
         }
 
         return $entity;
@@ -782,6 +702,68 @@ class EntityModel
 
         $this->validationErrors = [];
         return true;
+    }
+
+    /**
+     * Get an entity from the map, or all entities if no ID is provided.
+     * Touches the entity to mark it as recently used (LRU).
+     */
+    public function getFromCache(int|string|null $id = null): EntityInterface|array|null
+    {
+        if ($id === null) {
+            return static::$identityMap[$this->entityAlias];
+        }
+
+        if (isset(static::$identityMap[$this->entityAlias][$id])) {
+            $entity = static::$identityMap[$this->entityAlias][$id];
+
+            // Move to the end of the array (LRU)
+            unset(static::$identityMap[$this->entityAlias][$id]);
+            static::$identityMap[$this->entityAlias][$id] = $entity;
+
+            return $entity;
+        }
+
+        return null;
+    }
+
+    /**
+     * Add an entity to the map and enforce the LRU limit per alias.
+     */
+    public function addToCache(int|string $id, EntityInterface $entity): void
+    {
+        if (isset(static::$identityMap[$this->entityAlias][$id])) {
+            unset(static::$identityMap[$this->entityAlias][$id]);
+        }
+
+        static::$identityMap[$this->entityAlias][$id] = $entity;
+
+        if ($this->cacheLimit > 0 and count(static::$identityMap[$this->entityAlias]) > $this->cacheLimit) {
+            $oldestKey = array_key_first(static::$identityMap[$this->entityAlias]);
+            if ($oldestKey !== null) {
+                unset(static::$identityMap[$this->entityAlias][$oldestKey]);
+            }
+        }
+    }
+
+    /**
+     * Safely remove one or more entity IDs from this model's cache,
+     * or clear the entire cache for this entity type if no ID is provided.
+     */
+    public function removeFromCache(int|string|array|null $ids = null): void
+    {
+        if ($ids === null) {
+            static::$identityMap[$this->entityAlias] = [];
+            return;
+        }
+
+        if (!is_array($ids)) {
+            $ids = [$ids];
+        }
+
+        foreach ($ids as $id) {
+            unset(static::$identityMap[$this->entityAlias][$id]);
+        }
     }
 
     /**

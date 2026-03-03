@@ -35,10 +35,10 @@ class MetaModel extends EntityModel
 
     public function find(int|string $id): ?EntityInterface
     {
-        $cacheKey = $this->entityAlias . '_' . $id;
+        $entity = $this->getFromCache($id);
 
-        if (isset(static::$identityMap[$cacheKey])) {
-            return static::getFromIdentityMap($cacheKey);
+        if ($entity !== null) {
+            return $entity;
         }
 
         $rows = $this->builder()->where($this->metaEntityColumn, $id)->get()->getResultArray();
@@ -140,7 +140,7 @@ class MetaModel extends EntityModel
                     ->where($this->metaEntityColumn, $oldId)
                     ->delete();
 
-                static::deleteFromIdentityMap($this->entityAlias . '_' . $oldId);
+                $this->removeFromCache($oldId);
             }
 
             $entity->flushChanges();
@@ -160,7 +160,7 @@ class MetaModel extends EntityModel
                 ->where($this->metaEntityColumn, $oldId)
                 ->update([$this->metaEntityColumn => $newId]);
 
-            static::deleteFromIdentityMap($this->entityAlias . '_' . $oldId);
+            $this->removeFromCache($oldId);
         }
 
         $inserts = [];
@@ -222,7 +222,7 @@ class MetaModel extends EntityModel
         $entity->flushChanges();
 
         // Update the Identity Map to reflect the new ID
-        static::addToIdentityMap($this->entityAlias . '_' . $newId, $entity);
+        $this->addToCache($newId, $entity);
 
         return $this->db->transStatus();
     }
@@ -251,9 +251,7 @@ class MetaModel extends EntityModel
             ->whereIn($this->metaEntityColumn, $ids)
             ->delete();
 
-        foreach ($ids as $id) {
-            static::deleteFromIdentityMap($this->entityAlias . '_' . $id);
-        }
+        $this->removeFromCache($ids);
 
         return true;
     }
@@ -276,18 +274,15 @@ class MetaModel extends EntityModel
 
         $data[$this->primaryKey] = $id;
 
-        $cacheKey = $this->entityAlias . '_' . $id;
-
-        if (isset(static::$identityMap[$cacheKey])) {
-            $entity = static::getFromIdentityMap($cacheKey);
-            $entity->setAttributes($data);
-            $entity->flushChanges();
-            return $entity;
+        if ($cached = $this->getFromCache($id)) {
+            $cached->setAttributes($data);
+            $cached->flushChanges();
+            return $cached;
         }
 
         $entity = new $this->entityClass($data, $this->entityAlias, $this->entityFields);
 
-        static::addToIdentityMap($cacheKey, $entity);
+        $this->addToCache($id, $entity);
 
         return $entity;
     }
