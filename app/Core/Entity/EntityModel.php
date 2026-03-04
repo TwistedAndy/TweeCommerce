@@ -2,21 +2,23 @@
 
 namespace App\Core\Entity;
 
-use BadMethodCallException;
-use CodeIgniter\Pager\PagerInterface;
-use CodeIgniter\Database\BaseConnection;
+use App\Core\Entity\Traits\ModelCache;
+use App\Core\Entity\Traits\ModelRelations;
+
 use CodeIgniter\Database\BaseBuilder;
+use CodeIgniter\Database\BaseConnection;
+use CodeIgniter\Pager\PagerInterface;
 use CodeIgniter\Validation\ValidationInterface;
 
+use BadMethodCallException;
+
 /**
- * CI4-Native Data Mapper / Repository model.
- * Translates pure Entity objects to and from the database using CI4's native Builder proxying.
+ * Entity Model
  */
 class EntityModel
 {
-    protected static array $identityMap = [];
-
-    protected int $cacheLimit = 10000;
+    use ModelCache;
+    use ModelRelations;
 
     public readonly PagerInterface $pager;
 
@@ -26,9 +28,8 @@ class EntityModel
 
     protected string         $table;
     protected string         $primaryKey;
-    protected string         $entityClass;
-    protected string         $entityAlias;
-    protected EntityFields   $entityFields;
+    protected string         $class;
+    protected string         $alias;
     protected EntityRegistry $registry;
 
     protected string $dateFormat   = 'U';
@@ -40,33 +41,25 @@ class EntityModel
     protected bool $excludeDeleted = true;
     protected bool $useTimestamps  = false;
 
-    protected array $withRelations = [];
-
     protected ValidationInterface $validator;
 
     protected array $allowedFields    = [];
-    protected array $relationFields   = [];
     protected array $validationRules  = [];
     protected array $validationErrors = [];
     protected bool  $skipValidation   = false;
 
     public function __construct(string $alias, EntityRegistry $registry, ValidationInterface $validator, PagerInterface $pager)
     {
-        $entityFields = $registry->getEntityFields($alias);
+        $fields = $registry->getEntityFields($alias);
 
-        if ($entityFields === null) {
+        if ($fields === null) {
             throw new EntityException('There is no entity with specified alias: ' . $alias);
         }
 
-        $this->entityAlias  = $alias;
-        $this->entityClass  = $registry->getEntityClass($alias);
-        $this->entityFields = $entityFields;
-        $this->registry     = $registry;
-        $this->pager        = $pager;
-
-        if (!isset(static::$identityMap[$this->entityAlias])) {
-            static::$identityMap[$this->entityAlias] = [];
-        }
+        $this->alias    = $alias;
+        $this->class    = $registry->getEntityClass($alias);
+        $this->registry = $registry;
+        $this->pager    = $pager;
 
         $this->DBGroup = $registry->getDatabaseGroup($alias);
 
@@ -75,27 +68,21 @@ class EntityModel
         $this->builder = $this->db->table($this->table);
 
         $this->validator    = $validator;
-        $this->primaryKey   = $entityFields->getPrimaryKey();
-        $this->createdField = $entityFields->getCreatedKey();
-        $this->updatedField = $entityFields->getUpdatedKey();
-        $this->deletedField = $entityFields->getDeletedKey();
+        $this->primaryKey   = $fields->getPrimaryKey();
+        $this->createdField = $fields->getCreatedKey();
+        $this->updatedField = $fields->getUpdatedKey();
+        $this->deletedField = $fields->getDeletedKey();
 
         $allowedFields   = [];
-        $relationFields  = [];
         $validationRules = [];
 
-        $fieldList  = $entityFields->getFields();
-        $primaryKey = $entityFields->getPrimaryKey();
-        $relations  = $entityFields->getRelations();
+        $primaryKey = $fields->getPrimaryKey();
+        $relations  = $fields->getRelations();
 
-        foreach ($fieldList as $key => $field) {
+        foreach ($fields->getFields() as $key => $field) {
 
-            if ($key != $primaryKey) {
-                if (isset($relations[$key])) {
-                    $relationFields[$key] = true;
-                } else {
-                    $allowedFields[$key] = true;
-                }
+            if ($key != $primaryKey and !isset($relations[$key])) {
+                $allowedFields[$key] = true;
             }
 
             if (empty($field['rules']) or !is_array($field['rules']) or empty($field['rules']['rules'])) {
@@ -131,17 +118,20 @@ class EntityModel
         $this->useSoftDeletes = (bool) $this->deletedField;
 
         $this->allowedFields   = $allowedFields;
-        $this->relationFields  = $relationFields;
         $this->validationRules = $validationRules;
 
+        $this->setRelations($fields);
+
+        $this->initCache($this->alias);
+
         if ($this->createdField) {
-            $dateFormat = $entityFields->getDateFormat($this->createdField);
+            $dateFormat = $fields->getDateFormat($this->createdField);
 
             if ($dateFormat) {
                 $this->dateFormat = $dateFormat;
             }
         } elseif ($this->updatedField) {
-            $dateFormat = $entityFields->getDateFormat($this->updatedField);
+            $dateFormat = $fields->getDateFormat($this->updatedField);
 
             if ($dateFormat) {
                 $this->dateFormat = $dateFormat;
@@ -187,15 +177,6 @@ class EntityModel
         return $this->db->table($table);
     }
 
-    /**
-     * Queue relations to be loaded to prevent N+1 queries.
-     */
-    public function with(array|string $relations): self
-    {
-        $this->withRelations = is_string($relations) ? func_get_args() : $relations;
-        return $this;
-    }
-
     public function find(int|string $id): ?EntityInterface
     {
         $entity = $this->getFromCache($id);
@@ -224,7 +205,7 @@ class EntityModel
         }
 
         // Do not cache the relations
-        if (!empty($this->withRelations)) {
+        if ($this->hasWith()) {
             // Apply condition natively to the builder, then explicitly call the model's findAll() method
             $this->builder->whereIn($this->primaryKey, $ids);
             return $this->findAll();
@@ -280,10 +261,12 @@ class EntityModel
 
         $rows = $this->builder->get()->getResultArray();
 
-        $entities = array_map([$this, 'hydrateRow'], $rows);
+        if ($rows) {
+            $entities = array_map([$this, 'hydrateRow'], $rows);
 
-        if ($this->withRelations) {
             $this->loadRelations($entities);
+        } else {
+            $entities = [];
         }
 
         $this->reset();
@@ -297,16 +280,12 @@ class EntityModel
 
         $row = $this->builder->get()->getRowArray();
 
-        if (!$row) {
-            $this->withRelations = []; // Clear eager load queue if no result
+        if (empty($row)) {
+            $this->reset();
             return null;
         }
 
         $entity = $this->hydrateRow($row);
-
-        if ($this->withRelations) {
-            $this->loadRelations([$entity]);
-        }
 
         $this->reset();
 
@@ -326,7 +305,7 @@ class EntityModel
             return false;
         }
 
-        $useTransaction = count($this->entityFields->getRelations()) > 0;
+        $useTransaction = (bool) $this->getRelations();
 
         if ($useTransaction) {
             $this->db->transBegin();
@@ -334,7 +313,7 @@ class EntityModel
 
         try {
             // Pre-Save Relations (Transforms relation objects into FKs like author_id)
-            if ($this->relationFields) {
+            if ($useTransaction) {
                 $this->saveRelations($entity);
             }
 
@@ -366,7 +345,7 @@ class EntityModel
             $entity->setAttribute($this->primaryKey, $insertId);
 
             // Post-Save Relations (has-many, meta, etc.)
-            if ($this->relationFields) {
+            if ($useTransaction) {
                 $this->saveRelations($entity);
             }
 
@@ -399,7 +378,7 @@ class EntityModel
             return false;
         }
 
-        $useTransaction = count($this->entityFields->getRelations()) > 1;
+        $useTransaction = (bool) $this->getRelations();
 
         if ($useTransaction) {
             $this->db->transBegin();
@@ -407,7 +386,7 @@ class EntityModel
 
         try {
             // Pre-Save Relations
-            if ($this->relationFields) {
+            if ($useTransaction) {
                 $this->saveRelations($entity);
             }
 
@@ -428,7 +407,7 @@ class EntityModel
             $this->reset();
 
             // Post-Save Relations
-            if ($this->relationFields) {
+            if ($useTransaction) {
                 $this->saveRelations($entity);
             }
 
@@ -465,22 +444,28 @@ class EntityModel
             return true;
         }
 
-        $useTransaction = count($this->relationFields) > 0;
+        $useTransaction = $this->getRelations();
 
         if ($useTransaction) {
             $this->db->transBegin();
         }
 
+        if (!$this->useSoftDeletes) {
+            $purge = true;
+        }
+
         try {
-            $this->runCascadeDelete($ids, $purge or !$this->useSoftDeletes);
+            $this->cascadeDelete($ids, $this->alias, $purge);
 
             $this->withDeleted();
 
             $this->builder->whereIn($this->primaryKey, $ids);
 
-            $result = (!$purge and $this->useSoftDeletes)
-                ? $this->builder->update([$this->deletedField => $this->formatTimestamp(time())])
-                : $this->builder->delete();
+            if ($purge) {
+                $result = $this->builder->delete();
+            } else {
+                $result = $this->builder->update([$this->deletedField => $this->formatTimestamp(time())]);
+            }
 
             $this->reset();
 
@@ -515,14 +500,14 @@ class EntityModel
             return true;
         }
 
-        $useTransaction = count($this->relationFields) > 0;
+        $useTransaction = $this->getRelations();
 
         if ($useTransaction) {
             $this->db->transBegin();
         }
 
         try {
-            $this->runCascadeRestore($ids);
+            $this->cascadeRestore($ids);
 
             $this->withDeleted();
 
@@ -553,8 +538,8 @@ class EntityModel
     public function reset(): self
     {
         $this->builder->resetQuery();
-        $this->withRelations  = [];
         $this->excludeDeleted = true;
+        $this->resetWith();
 
         return $this;
     }
@@ -580,6 +565,15 @@ class EntityModel
         return $this->findAll();
     }
 
+    public function handleDeleted(): self
+    {
+        if ($this->useSoftDeletes and $this->excludeDeleted) {
+            $this->builder->where($this->table . '.' . $this->deletedField, null);
+        }
+
+        return $this;
+    }
+
     public function onlyDeleted(): self
     {
         if ($this->useSoftDeletes) {
@@ -597,15 +591,6 @@ class EntityModel
         return $this;
     }
 
-    public function handleDeleted(): self
-    {
-        if ($this->useSoftDeletes and $this->excludeDeleted) {
-            $this->builder->where($this->table . '.' . $this->deletedField, null);
-        }
-
-        return $this;
-    }
-
     public function hydrateRow(array $row): EntityInterface
     {
         $entityId = $row[$this->primaryKey] ?? null;
@@ -614,7 +599,7 @@ class EntityModel
             return $cached;
         }
 
-        $entity = new $this->entityClass($row, $this->entityAlias, $this->entityFields);
+        $entity = new $this->class($row, $this->alias);
 
         if (!empty($entityId)) {
             $this->addToCache($entityId, $entity);
@@ -676,160 +661,6 @@ class EntityModel
         $this->skipValidation = $skip;
 
         return $this;
-    }
-
-    /**
-     * Get an entity from the map, or all entities if no ID is provided.
-     * Touches the entity to mark it as recently used (LRU).
-     */
-    public function getFromCache(int|string|null $id = null): EntityInterface|array|null
-    {
-        if ($id === null) {
-            return static::$identityMap[$this->entityAlias];
-        }
-
-        if (isset(static::$identityMap[$this->entityAlias][$id])) {
-            $entity = static::$identityMap[$this->entityAlias][$id];
-
-            // Move to the end of the array (LRU)
-            unset(static::$identityMap[$this->entityAlias][$id]);
-            static::$identityMap[$this->entityAlias][$id] = $entity;
-
-            return $entity;
-        }
-
-        return null;
-    }
-
-    /**
-     * Add an entity to the map and enforce the LRU limit per alias.
-     */
-    public function addToCache(int|string $id, EntityInterface $entity): void
-    {
-        if (isset(static::$identityMap[$this->entityAlias][$id])) {
-            unset(static::$identityMap[$this->entityAlias][$id]);
-        }
-
-        static::$identityMap[$this->entityAlias][$id] = $entity;
-
-        if ($this->cacheLimit > 0 and count(static::$identityMap[$this->entityAlias]) > $this->cacheLimit) {
-            $oldestKey = array_key_first(static::$identityMap[$this->entityAlias]);
-            if ($oldestKey !== null) {
-                unset(static::$identityMap[$this->entityAlias][$oldestKey]);
-            }
-        }
-    }
-
-    /**
-     * Safely remove one or more entity IDs from this model's cache,
-     * or clear the entire cache for this entity type if no ID is provided.
-     */
-    public function removeFromCache(int|string|array|null $ids = null): void
-    {
-        if ($ids === null) {
-            static::$identityMap[$this->entityAlias] = [];
-            return;
-        }
-
-        if (!is_array($ids)) {
-            $ids = [$ids];
-        }
-
-        foreach ($ids as $id) {
-            unset(static::$identityMap[$this->entityAlias][$id]);
-        }
-    }
-
-    /**
-     * Save the entity relations
-     */
-    protected function saveRelations(EntityInterface $entity): void
-    {
-        $changes    = $entity->getChanges();
-        $attributes = $entity->getAttributes();
-
-        foreach ($this->relationFields as $field => $flag) {
-
-            // Process immediately explicit assignments
-            if (array_key_exists($field, $changes)) {
-                $this->entityFields->getRelation($field)->update($entity, $changes[$field]);
-                continue;
-            }
-
-            // Skip deep scan if a relation was never loaded
-            if (empty($attributes[$field])) {
-                continue;
-            }
-
-            // Deep Scanning: Check the currently loaded attribute
-            $value = $attributes[$field];
-
-            $hasDeepChanges = false;
-
-            if ($value instanceof EntityInterface) {
-                $hasDeepChanges = $value->hasChanged();
-            } elseif (is_array($value)) {
-                foreach ($value as $item) {
-                    if ($item instanceof EntityInterface && $item->hasChanged()) {
-                        $hasDeepChanges = true;
-                        break;
-                    }
-                }
-            }
-
-            // If any loaded entity has changed, push it into the update cycle
-            if ($hasDeepChanges) {
-                $this->entityFields->getRelation($field)->update($entity, $value);
-            }
-        }
-    }
-
-    /**
-     * Eagerly load the relation data for entities
-     */
-    protected function loadRelations(array $entities): void
-    {
-        $relations = $this->withRelations;
-
-        $this->withRelations = [];
-
-        if (empty($relations) or empty($entities)) {
-            return;
-        }
-
-        foreach ($relations as $relationName) {
-            if (!empty($this->relationFields[$relationName])) {
-                $this->entityFields->getRelation($relationName)->eagerLoad($entities);
-            }
-        }
-    }
-
-    /**
-     * Run cascade delete for all relations that have cascade => true.
-     */
-    protected function runCascadeDelete(array $ids, bool $purge): void
-    {
-        foreach ($this->relationFields as $key => $flag) {
-            $relation = $this->entityFields->getRelation($key);
-
-            if ($relation->isCascade()) {
-                $relation->cascadeDelete($ids, $this->entityAlias, $purge);
-            }
-        }
-    }
-
-    /**
-     * Run cascade restore for all relations that have cascade => true.
-     */
-    protected function runCascadeRestore(array $ids): void
-    {
-        foreach ($this->relationFields as $key => $flag) {
-            $relation = $this->entityFields->getRelation($key);
-
-            if ($relation->isCascade()) {
-                $relation->cascadeRestore($ids);
-            }
-        }
     }
 
     /**

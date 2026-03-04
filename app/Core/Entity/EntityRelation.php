@@ -149,11 +149,6 @@ class EntityRelation
         return $this->isMultiple ? $this->resolveMany($value) : $this->resolveOne($value);
     }
 
-    public function isCascade(): bool
-    {
-        return $this->cascade;
-    }
-
     /**
      * Cascade a delete operation to one or more parent entity IDs.
      *
@@ -171,7 +166,7 @@ class EntityRelation
      */
     public function cascadeDelete(array $localIds, string $localAlias, bool $purge): void
     {
-        if (empty($localIds) or $this->type === 'belongs-one') {
+        if (!$this->cascade or empty($localIds) or $this->type === 'belongs-one') {
             return;
         }
 
@@ -221,7 +216,7 @@ class EntityRelation
      */
     public function cascadeRestore(array $localIds): void
     {
-        if (empty($localIds) or in_array($this->type, ['belongs-one', 'belongs-many', 'meta'], true)) {
+        if (!$this->cascade or empty($localIds) or in_array($this->type, ['belongs-one', 'belongs-many', 'meta'], true)) {
             return;
         }
 
@@ -469,7 +464,7 @@ class EntityRelation
         $meta = $localEntity->getAttribute($this->relationName);
 
         if (!$meta instanceof EntityInterface) {
-            $meta = new $this->relatedClass([], $this->relatedAlias, $this->relatedFields);
+            $meta = new $this->relatedClass([], $this->relatedAlias);
             $localEntity->setAttribute($this->relationName, $meta);
         }
 
@@ -690,7 +685,7 @@ class EntityRelation
 
             // Instantiate an empty entity and use setAttributes() so the data is
             // registered internally as $changes. Otherwise, the model will skip saving it
-            $entity = new $this->relatedClass([], $this->relatedAlias, $this->relatedFields);
+            $entity = new $this->relatedClass([], $this->relatedAlias);
             $entity->setAttributes($value);
 
             return $entity;

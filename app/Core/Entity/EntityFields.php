@@ -235,6 +235,14 @@ class EntityFields
     }
 
     /**
+     * Get all fields in the normalized format
+     */
+    public function getFields(): array
+    {
+        return $this->fields;
+    }
+
+    /**
      * Add a new relation
      *
      * @param string $key
@@ -303,6 +311,45 @@ class EntityFields
         ];
     }
 
+    /**
+     * Get relation data
+     */
+    public function getRelations(): array
+    {
+        return $this->relationData;
+    }
+
+    /**
+     * Get a relation object
+     */
+    public function getRelation(string $key): EntityRelation
+    {
+        if (isset($this->relations[$key])) {
+            return $this->relations[$key];
+        }
+
+        if (!isset($this->relationData[$key])) {
+            throw new EntityException('Relation "' . $key . '" is not defined for an entity.');
+        }
+
+        $relation = $this->container->make(EntityRelation::class, [
+            'name'     => $key,
+            'relation' => $this->relationData[$key]
+        ]);
+
+        $this->relations[$key] = $relation;
+
+        return $relation;
+    }
+
+    /**
+     * Get a primary key
+     */
+    public function getPrimaryKey(): string
+    {
+        return $this->primaryKey;
+    }
+
     public function getCreatedKey(): string
     {
         return $this->createdKey;
@@ -324,61 +371,6 @@ class EntityFields
     public function getDateFormat(string $key): string|null
     {
         return $this->dateFormats[$key] ?? null;
-    }
-
-    /**
-     * Get relation data
-     */
-    public function getRelations(): array
-    {
-        return $this->relationData;
-    }
-
-    /**
-     * Get a relation object
-     */
-    public function getRelation(string $key): EntityRelation|null
-    {
-        if (isset($this->relations[$key])) {
-            return $this->relations[$key];
-        }
-
-        if (!isset($this->relationData[$key])) {
-            return null;
-        }
-
-        $relation = $this->container->make(EntityRelation::class, [
-            'name'     => $key,
-            'relation' => $this->relationData[$key]
-        ]);
-
-        $this->relations[$key] = $relation;
-
-        return $relation;
-    }
-
-    /**
-     * Get all fields in the normalized format
-     */
-    public function getFields(): array
-    {
-        return $this->fields;
-    }
-
-    /**
-     * Get a field array
-     */
-    public function getField(string $key): array|null
-    {
-        return $this->fields[$key] ?? null;
-    }
-
-    /**
-     * Get a primary key name
-     */
-    public function getPrimaryKey(): string
-    {
-        return $this->primaryKey;
     }
 
     /**
@@ -404,7 +396,7 @@ class EntityFields
     /**
      * Convert a field value in the storage format
      */
-    public function castToStorage(string $field, $value)
+    public function castToStorage(string $field, mixed $value): mixed
     {
         if (!isset($this->casts[$field]) or ($value === null and isset($this->nullable[$field]))) {
             return $value;
@@ -516,7 +508,7 @@ class EntityFields
     /**
      * Convert a field value from the storage format
      */
-    public function castFromStorage(string $field, $value)
+    public function castFromStorage(string $field, mixed $value): mixed
     {
         if (!isset($this->casts[$field]) or ($value === null and isset($this->nullable[$field]))) {
             return $value;
@@ -599,7 +591,7 @@ class EntityFields
      * Get a default field value in the storage format.
      * Returned values are already in storage format and do not need casting.
      */
-    public function getCastDefault(string $cast): mixed
+    public function getCastDefault(string $cast): string|int|float
     {
         return match ($cast) {
             'int', 'bool', 'timestamp' => 0,

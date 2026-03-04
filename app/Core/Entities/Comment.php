@@ -66,7 +66,7 @@ class Comment extends Entity
                 'type'     => 'relation',
                 'relation' => [
                     'type'   => 'meta',
-                    'entity' => 'commnent_meta',
+                    'entity' => 'comment_meta',
                 ]
             ],
         ];
