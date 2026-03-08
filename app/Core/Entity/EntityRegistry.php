@@ -130,13 +130,19 @@ class EntityRegistry
 
     /**
      * Get the Pivot Table name
+     *
+     * @return array{
+     *   table:          string,
+     *   local_column:   string,
+     *   foreign_column: string
+     * }
      */
     public function getPivotConfig(string $localAlias, string $relatedAlias): array
     {
         $config = $this->getConfig($localAlias);
 
         if (empty($config['pivots']) or empty($config['pivots'][$relatedAlias])) {
-            return [];
+            throw EntityException::pivotNotDefined($relatedAlias);
         }
 
         $pivotConfig = $config['pivots'][$relatedAlias];

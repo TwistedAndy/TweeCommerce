@@ -73,7 +73,7 @@ class EntityException extends \RuntimeException
 
     public static function unsupportedRelationType(string $key, string $type): self
     {
-        return new self("Relation '{$key}': unsupported type '{$type}'. Supported: has-one, has-many, belongs-one, belongs-many, meta.", 205);
+        return new self("Relation '{$key}': unsupported type '{$type}'. Supported: has-one, has-many, belongs-one, belongs-many, meta, morph-one, morph-many, morph-to, morph-belongs-many.", 205);
     }
 
     public static function closureCallback(string $key): self
@@ -89,6 +89,11 @@ class EntityException extends \RuntimeException
     public static function invalidForeignKey(string $key, string $foreignKey): self
     {
         return new self("Relation '{$key}': foreign key '{$foreignKey}' does not exist in the entity fields.", 208);
+    }
+
+    public static function missingMorphKey(string $key): self
+    {
+        return new self("Relation '{$key}': morph relations require a 'morph_key' prefix (e.g. 'commentable' → commentable_id + commentable_type).", 209);
     }
 
     // -------------------------------------------------------------------------
@@ -153,7 +158,7 @@ class EntityException extends \RuntimeException
 
     public static function pivotNotDefined(string $relation): self
     {
-        return new self("No pivot configuration is defined for the '{$relation}' relation.", 502);
+        return new self("No pivot configuration is defined for the '{$relation}' alias.", 502);
     }
 
     public static function relatedNotFound(string $class, int|string $id): self
@@ -206,5 +211,10 @@ class EntityException extends \RuntimeException
     public static function invalidItem(string $relation, string $class): self
     {
         return new self("Relation '{$relation}': each item must be an ID, associative array, or {$class} instance.", 605);
+    }
+
+    public static function morphToRequiresInstance(string $relation): self
+    {
+        return new self("Relation '{$relation}' is a morph-to relation and must be assigned an instantiated EntityInterface object, not an array or scalar ID.", 606);
     }
 }

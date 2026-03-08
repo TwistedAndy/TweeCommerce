@@ -346,9 +346,7 @@ class EntityModel
             return true;
         }
 
-        $data = $entity->getChanges();
-
-        if (!$this->validate($data, true)) {
+        if (!$this->validate($entity, true)) {
             return false;
         }
 
@@ -594,25 +592,29 @@ class EntityModel
     /**
      * Validate the Entity or raw data array against the parsed rules.
      */
-    public function validate(EntityInterface|array $data, $skipMissing = false): bool
+    public function validate(EntityInterface|array $data, bool $skipMissing = false): bool
     {
         if ($this->skipValidation or empty($this->validationRules)) {
             return true;
         }
 
+        // Get the full attribute set for context (handles matches[] and is_unique[] placeholders)
         $row = $data instanceof EntityInterface ? $data->getAttributes() : $data;
 
         $rules = $this->validationRules;
 
         if ($skipMissing) {
-            foreach (array_keys($rules) as $field) {
-                if (!array_key_exists($field, $row)) {
-                    unset($rules[$field]);
+            // For updates, we only care about rules for fields present in the input
+            $input = $data instanceof EntityInterface ? $data->getChanges() : $data;
+
+            foreach ($input as $key => $value) {
+                if (!array_key_exists($key, $input)) {
+                    unset($rules[$key]);
                 }
             }
         }
 
-        // If no data existed that needs validation, we're good to go.
+        // If no rules remain after filtering, validation is technically successful
         if (empty($rules)) {
             return true;
         }

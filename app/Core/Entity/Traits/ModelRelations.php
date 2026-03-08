@@ -22,20 +22,37 @@ trait ModelRelations
     protected array $relations = [];
 
     /**
-     * A queue of eagerly loaded relations
+     * A queue of eagerly loaded relations: [ 'relationName' => Closure|null ]
      */
     protected array $withRelations = [];
 
     /**
-     * Queue relations to be eagerly loaded
+     * Queue relations to be eagerly loaded.
+     *
+     * Accepts plain names or an associative array with optional inline constraints:
+     * ->with('author')
+     * ->with('author', 'comments')
+     * ->with(['author', 'comments' => fn($q) => $q->where('approved', 1)])
+     * ->with(['comments' => [$this, 'scopeApproved']])
      */
-    public function with(array|string $relations): self
+    public function with(array|string ...$relations): self
     {
-        $this->withRelations = is_string($relations) ? func_get_args() : $relations;
+        foreach ($relations as $arg) {
+            // Normalize the argument so we can iterate smoothly
+            $list = is_array($arg) ? $arg : [$arg];
 
-        foreach ($this->withRelations as $key) {
-            if (!isset($this->relations[$key])) {
-                throw EntityException::undefinedRelation($key);
+            foreach ($list as $key => $value) {
+                // If the key is numeric, it's just a string relation name.
+                // Otherwise, the key is the name and the value is the constraint.
+                $name       = is_int($key) ? (string) $value : (string) $key;
+                $constraint = is_callable($value) ? $value : null;
+
+                if (!isset($this->relations[$name])) {
+                    throw EntityException::undefinedRelation($name);
+                }
+
+                // Assign to the queue (this preserves existing queued relations for chaining)
+                $this->withRelations[$name] = $constraint;
             }
         }
 
@@ -132,8 +149,8 @@ trait ModelRelations
             return;
         }
 
-        foreach ($relations as $key) {
-            $this->fields->getRelation($key)->eagerLoad($entities);
+        foreach ($relations as $key => $constraint) {
+            $this->fields->getRelation($key)->eagerLoad($entities, $constraint);
         }
     }
 
@@ -166,7 +183,7 @@ trait ModelRelations
         foreach ($this->relations as $key => $data) {
             if (!empty($data['cascade'])) {
                 $relation = $this->fields->getRelation($key);
-                $relation->cascadeRestore($localIds);
+                $relation->cascadeRestore($localIds, $this->alias);
             }
         }
     }

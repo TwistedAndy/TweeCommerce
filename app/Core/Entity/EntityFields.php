@@ -16,7 +16,6 @@ class EntityFields
     protected Container $container;
     protected Sanitizer $sanitizer;
 
-    protected string $entity     = '';
     protected string $primaryKey = '';
     protected string $createdKey = '';
     protected string $updatedKey = '';
@@ -73,22 +72,20 @@ class EntityFields
      *     foreign_key?: string,
      *   },
      * }> $fields
-     * @param class-string<EntityInterface> $entity
      * @param Container $container
      * @param Sanitizer $sanitizer
      */
-    public function __construct(array $fields, string $entity, Container $container, Sanitizer $sanitizer)
+    public function __construct(array $fields, Container $container, Sanitizer $sanitizer)
     {
         $this->container = $container;
         $this->sanitizer = $sanitizer;
-        $this->entity    = $entity;
 
         foreach ($fields as $key => $field) {
             $this->addField($key, $field);
         }
 
         if (empty($this->primaryKey)) {
-            throw EntityException::noPrimaryKey($entity);
+            throw EntityException::noPrimaryKey();
         }
 
         foreach ($this->fields as $key => $field) {
@@ -320,6 +317,7 @@ class EntityFields
      *   entity:       string,
      *   local_key?:   string,
      *   foreign_key?: string,
+     *   morph_key?:   string,
      *   cascade?:     bool,
      *   constraint?:  array{
      *     limit?:    int,
@@ -336,46 +334,63 @@ class EntityFields
             throw EntityException::duplicateRelation($key);
         }
 
-        if (empty($relation['entity']) or !is_string($relation['entity'])) {
-            throw EntityException::missingRelationAlias($key);
-        }
+        $type = $relation['type'] ?? '';
 
-        if (empty($relation['type'])) {
+        if (empty($type) or !is_string($type)) {
             throw EntityException::missingRelationType($key);
         }
 
-        if (!is_string($relation['type']) or !in_array($relation['type'], ['has-one', 'has-many', 'belongs-one', 'belongs-many', 'meta'])) {
-            throw EntityException::unsupportedRelationType($key, (string) $relation['type']);
+        if (!in_array($type, ['has-one', 'has-many', 'belongs-one', 'belongs-many', 'meta', 'morph-one', 'morph-many', 'morph-to', 'morph-belongs-many'], true)) {
+            throw EntityException::unsupportedRelationType($key, $type);
         }
 
-        if (empty($relation['local_key']) or !is_string($relation['local_key'])) {
-            $relation['local_key'] = $this->primaryKey;
+        // entity is required for all types; morph-to is the only exception (resolved dynamically at runtime)
+        $entity = $relation['entity'] ?? '';
+
+        if (!is_string($entity) or ($type !== 'morph-to' and empty($entity))) {
+            throw EntityException::missingRelationAlias($key);
         }
 
-        if (empty($relation['foreign_key']) or !is_string($relation['foreign_key'])) {
-            $relation['foreign_key'] = '';
+        $localKey   = (!empty($relation['local_key']) and is_string($relation['local_key'])) ? $relation['local_key'] : $this->primaryKey;
+        $foreignKey = (!empty($relation['foreign_key']) and is_string($relation['foreign_key'])) ? $relation['foreign_key'] : '';
+        $morphKey   = '';
+
+        if (str_starts_with($type, 'morph-')) {
+            $morphKey = $relation['morph_key'] ?? '';
+
+            if (empty($morphKey) or !is_string($morphKey)) {
+                throw EntityException::missingMorphKey($key);
+            }
+
+            // morph-to: both morph columns must exist on the local entity
+            if ($type === 'morph-to') {
+                foreach ([$morphKey . '_id', $morphKey . '_type'] as $column) {
+                    if (!isset($this->fields[$column])) {
+                        throw EntityException::invalidForeignKey($key, $column);
+                    }
+                }
+            }
+        }
+
+        if (!isset($this->fields[$localKey])) {
+            throw EntityException::invalidLocalKey($key, $localKey);
+        }
+
+        if ($type === 'belongs-one' and !empty($foreignKey) and !isset($this->fields[$foreignKey])) {
+            throw EntityException::invalidForeignKey($key, $foreignKey);
         }
 
         if (isset($relation['constraint']['callback']) and $relation['constraint']['callback'] instanceof \Closure) {
             throw EntityException::closureCallback($key);
         }
 
-        // Validate local_key exists in this entity's fields
-        if (!isset($this->fields[$relation['local_key']])) {
-            throw EntityException::invalidLocalKey($key, $relation['local_key']);
-        }
-
-        // Validate belongs-one foreign_key exists in this entity's fields
-        if ($relation['type'] === 'belongs-one' and !empty($relation['foreign_key']) and !isset($this->fields[$relation['foreign_key']])) {
-            throw EntityException::invalidForeignKey($key, $relation['foreign_key']);
-        }
-
         $this->relationData[$key] = [
-            'type'        => $relation['type'],
-            'entity'      => $relation['entity'],
-            'local_key'   => $relation['local_key'],
-            'foreign_key' => $relation['foreign_key'],
-            'constraint'  => $relation['constraint'] ?? [],
+            'type'        => $type,
+            'entity'      => $entity,
+            'local_key'   => $localKey,
+            'foreign_key' => $foreignKey,
+            'morph_key'   => $morphKey,
+            'constraint'  => $relation['constraint']  ?? [],
             'cascade'     => (bool) ($relation['cascade'] ?? false),
         ];
     }
@@ -403,7 +418,7 @@ class EntityFields
 
         $relation = $this->container->make(EntityRelation::class, [
             'name'     => $key,
-            'relation' => $this->relationData[$key]
+            'relation' => $this->relationData[$key],
         ]);
 
         $this->relations[$key] = $relation;

@@ -21,13 +21,15 @@ class EntityRelation
     protected string $localKey     = '';
     protected string $foreignKey   = '';
     protected string $relationName = '';
+    protected string $morphTypeKey = '';
+    protected string $morphKey     = '';
     protected array  $constraint   = [];
     protected bool   $cascade      = false;
-    protected array  $pivot        = [];
 
     public function __construct(string $name, array $relation, EntityRegistry $registry)
     {
-        if (empty($relation['entity'])) {
+        // morph-to resolves its entity dynamically — no fixed alias at construction
+        if (($relation['type'] ?? '') !== 'morph-to' and empty($relation['entity'])) {
             throw EntityException::missingRelationAlias($name);
         }
 
@@ -39,21 +41,37 @@ class EntityRelation
         $this->constraint   = $relation['constraint'] ?? [];
         $this->cascade      = (bool) ($relation['cascade'] ?? false);
         $this->relationName = $name;
+        $this->isMultiple   = in_array($this->type, ['has-many', 'belongs-many', 'morph-many', 'morph-belongs-many'], true);
 
-        $this->relatedAlias  = $relation['entity'];
-        $this->relatedConfig = $this->registry->getConfig($this->relatedAlias);
-        $this->relatedClass  = $registry->getEntityClass($this->relatedAlias);
-        $this->relatedFields = $registry->getEntityFields($this->relatedAlias);
-        $this->relatedModel  = $registry->getModel($this->relatedAlias);
-        $this->relatedTable  = $this->registry->getEntityTable($this->relatedAlias);
-        $this->relatedKey    = $this->relatedFields->getPrimaryKey();
+        // Resolve related entity for all types except morph-to (dynamic at runtime)
+        if ($this->type !== 'morph-to') {
+            $this->relatedAlias  = $relation['entity'];
+            $this->relatedConfig = $this->registry->getConfig($this->relatedAlias);
+            $this->relatedClass  = $registry->getEntityClass($this->relatedAlias);
+            $this->relatedFields = $registry->getEntityFields($this->relatedAlias);
+            $this->relatedModel  = $registry->getModel($this->relatedAlias);
+            $this->relatedTable  = $this->registry->getEntityTable($this->relatedAlias);
+            $this->relatedKey    = $this->relatedFields->getPrimaryKey();
+        }
 
-        $this->isMultiple = in_array($this->type, ['has-many', 'belongs-many'], true);
-
-        // Enforce pivot keys for belongs-many relations
-        if ($this->type === 'belongs-many' and empty($this->foreignKey)) {
+        // Enforce FK default for pivot-based relations
+        if (in_array($this->type, ['belongs-many', 'morph-belongs-many'], true) and empty($this->foreignKey)) {
             $this->foreignKey = $this->relatedKey;
         }
+
+        // Derive morph column names from the morph_key prefix
+        if (str_starts_with($this->type, 'morph-')) {
+            $morphKey           = $relation['morph_key'] ?? '';
+            $this->morphTypeKey = $morphKey . '_type';
+
+            if ($this->type === 'morph-belongs-many') {
+                $this->morphKey = $morphKey . '_id';
+            } else {
+                // morph-one, morph-many, morph-to: foreignKey is the morph_id column
+                $this->foreignKey = $morphKey . '_id';
+            }
+        }
+
     }
 
     /**
@@ -87,11 +105,21 @@ class EntityRelation
             return $localId ? $this->relatedModel->find($localId) : null;
         }
 
+        if ($this->type === 'morph-to') {
+            $morphId   = $entity->getAttribute($this->foreignKey);
+            $morphType = $entity->getAttribute($this->morphTypeKey);
+            if (empty($morphId) or empty($morphType)) {
+                return null;
+            }
+            return $this->registry->getModel($morphType)->find($morphId);
+        }
+
         if ($this->type === 'belongs-one' and !$this->getForeignId($entity)) {
             return null;
         }
 
-        if ($this->type !== 'belongs-one' and !$this->getLocalId($entity)) {
+        // Exclude both belongs-one AND morph-to from the local ID check
+        if (!in_array($this->type, ['belongs-one', 'morph-to'], true) and !$this->getLocalId($entity)) {
             return $this->isMultiple ? [] : null;
         }
 
@@ -102,8 +130,8 @@ class EntityRelation
     {
         $localId = $this->getLocalId($localEntity);
 
-        // Safely defer relations that require a parent ID until the parent is saved
-        if (empty($localId) and $this->type !== 'belongs-one') {
+        // morph-to and belongs-one set data on the local entity - no parent ID required
+        if (empty($localId) and !in_array($this->type, ['belongs-one', 'morph-to'], true)) {
             return;
         }
 
@@ -113,6 +141,10 @@ class EntityRelation
             'has-many' => $this->updateHasMany($localId, $relatedData),
             'belongs-one' => $this->updateBelongsOne($localEntity, $relatedData),
             'belongs-many' => $this->updateBelongsMany($localEntity, $relatedData),
+            'morph-one' => $this->updateMorphOne($localEntity, $relatedData),
+            'morph-many' => $this->updateMorphMany($localEntity, $relatedData),
+            'morph-to' => $this->updateMorphTo($localEntity, $relatedData),
+            'morph-belongs-many' => $this->updateMorphBelongsMany($localEntity, $relatedData),
             default => throw EntityException::unsupportedType($this->type, 'update')
         };
     }
@@ -138,6 +170,16 @@ class EntityRelation
      */
     public function resolve(int|string|array|EntityInterface|null $value): EntityInterface|array|null
     {
+        if ($this->type === 'morph-to') {
+            if ($value === null) {
+                return null;
+            }
+            if ($value instanceof EntityInterface) {
+                return $value;
+            }
+            throw EntityException::morphToRequiresInstance($this->relationName);
+        }
+
         return $this->isMultiple ? $this->resolveMany($value) : $this->resolveOne($value);
     }
 
@@ -153,22 +195,22 @@ class EntityRelation
     public function join(BaseBuilder $builder, string $localTable, string $localAlias, BaseConnection $db, string $column = ''): void
     {
         switch ($this->type) {
-            case 'belongs-one':
-                $builder->join($this->relatedTable, "{$this->relatedTable}.{$this->relatedKey} = {$localTable}.{$this->foreignKey}", 'left');
-                break;
-
             case 'has-one':
             case 'has-many':
                 $builder->join($this->relatedTable, "{$this->relatedTable}.{$this->foreignKey} = {$localTable}.{$this->localKey}", 'left');
                 break;
 
+            case 'belongs-one':
+                $builder->join($this->relatedTable, "{$this->relatedTable}.{$this->relatedKey} = {$localTable}.{$this->foreignKey}", 'left');
+                break;
+
             case 'belongs-many':
                 $pivot = $this->registry->getPivotConfig($localAlias, $this->relatedAlias);
-                $fk    = $this->foreignKey ? : $this->relatedKey;
+                $foreignKey = $this->foreignKey ? : $this->relatedKey;
 
                 $builder
                     ->join($pivot['table'], "{$pivot['table']}.{$pivot['local_column']} = {$localTable}.{$this->localKey}", 'left')
-                    ->join($this->relatedTable, "{$this->relatedTable}.{$fk} = {$pivot['table']}.{$pivot['foreign_column']}", 'left');
+                    ->join($this->relatedTable, "{$this->relatedTable}.{$foreignKey} = {$pivot['table']}.{$pivot['foreign_column']}", 'left');
                 break;
 
             case 'meta':
@@ -181,6 +223,23 @@ class EntityRelation
                     "{$alias}.{$entityColumn} = {$localTable}.{$this->localKey} AND {$alias}.{$keyColumn} = " . $db->escape($column),
                     'left'
                 );
+                break;
+
+            case 'morph-one':
+            case 'morph-many':
+                $builder->join(
+                    $this->relatedTable,
+                    "{$this->relatedTable}.{$this->foreignKey} = {$localTable}.{$this->localKey} AND {$this->relatedTable}.{$this->morphTypeKey} = " . $db->escape($localAlias),
+                    'left'
+                );
+                break;
+
+            case 'morph-belongs-many':
+                $pivot = $this->registry->getPivotConfig($localAlias, $this->relatedAlias);
+
+                $builder
+                    ->join($pivot['table'], "{$pivot['table']}.{$this->morphKey} = {$localTable}.{$this->localKey} AND {$pivot['table']}.{$this->morphTypeKey} = " . $db->escape($localAlias), 'left')
+                    ->join($this->relatedTable, "{$this->relatedTable}.{$this->relatedKey} = {$pivot['table']}.{$this->foreignKey}", 'left');
                 break;
 
             default:
@@ -206,11 +265,10 @@ class EntityRelation
                 $localId
             ),
             'has-one', 'has-many' => $builder->where($this->foreignKey, $localId),
-            'belongs-one' => $builder->where(
-                $this->relatedKey,
-                $this->getForeignId($localEntity)
-            ),
+            'morph-one', 'morph-many' => $builder->where($this->foreignKey, $localId)->where($this->morphTypeKey, $localEntity->getAlias()),
+            'belongs-one' => $builder->where($this->relatedKey, $this->getForeignId($localEntity)),
             'belongs-many' => $this->buildBelongsManyQuery($localEntity, $localId),
+            'morph-belongs-many' => $this->buildMorphBelongsManyQuery($localEntity, $localId),
             default => throw EntityException::unsupportedType($this->type, 'query')
         };
 
@@ -238,7 +296,8 @@ class EntityRelation
      */
     public function cascadeDelete(array $localIds, string $localAlias, bool $purge): void
     {
-        if (!$this->cascade or empty($localIds) or $this->type === 'belongs-one') {
+        // morph-to: inverse side — the related entity is not owned by the parent
+        if (!$this->cascade or empty($localIds) or in_array($this->type, ['belongs-one', 'morph-to'], true)) {
             return;
         }
 
@@ -252,22 +311,32 @@ class EntityRelation
 
         if ($this->type === 'belongs-many') {
             if ($purge) {
-                $pivotConfig = $this->registry->getPivotConfig($localAlias, $this->relatedAlias);
-
-                if (!empty($pivotConfig)) {
-                    $this->syncPivot($pivotConfig['table'], $pivotConfig['local_column'], $pivotConfig['foreign_column'], $localIds, []);
-                }
+                $pivot = $this->registry->getPivotConfig($localAlias, $this->relatedAlias);
+                $this->syncPivot($pivot['table'], $pivot['local_column'], $pivot['foreign_column'], $localIds, []);
             }
 
             return;
         }
 
-        // has-one / has-many: one query to get all related IDs across every parent,
-        // then a single bulk delete (which recursively handles their own cascades).
-        $rows = $this->relatedModel->builder()
+        if ($this->type === 'morph-belongs-many') {
+            if ($purge) {
+                $pivot = $this->registry->getPivotConfig($localAlias, $this->relatedAlias);
+                $this->syncPivot($pivot['table'], $this->morphKey, $this->foreignKey, $localIds, [], $this->morphTypeKey, $localAlias);
+            }
+
+            return;
+        }
+
+        // has-one / has-many / morph-one / morph-many: batch fetch related IDs then delete recursively
+        $builder = $this->relatedModel->builder()
             ->select($this->relatedKey)
-            ->whereIn($this->foreignKey, $localIds)
-            ->get()->getResultArray();
+            ->whereIn($this->foreignKey, $localIds);
+
+        if ($this->morphTypeKey !== '') {
+            $builder->where($this->morphTypeKey, $localAlias);
+        }
+
+        $rows = $builder->get()->getResultArray();
 
         $this->relatedModel->reset();
 
@@ -286,17 +355,23 @@ class EntityRelation
      * For belongs-many / belongs-one: no-op — pivot records were preserved on soft-delete,
      *   and the referenced entity is not owned by the parent.
      */
-    public function cascadeRestore(array $localIds): void
+    public function cascadeRestore(array $localIds, string $localAlias = ''): void
     {
-        if (!$this->cascade or empty($localIds) or in_array($this->type, ['belongs-one', 'belongs-many', 'meta'], true)) {
+        // morph-to and morph-belongs-many: not owned by parent — no-op
+        if (!$this->cascade or empty($localIds) or in_array($this->type, ['belongs-one', 'belongs-many', 'meta', 'morph-to', 'morph-belongs-many'], true)) {
             return;
         }
 
-        // has-one / has-many: include soft-deleted rows (raw builder bypasses maybeExcludeDeleted)
-        $rows = $this->relatedModel->builder()
+        // has-one / has-many / morph-one / morph-many: include soft-deleted rows
+        $builder = $this->relatedModel->builder()
             ->select($this->relatedKey)
-            ->whereIn($this->foreignKey, $localIds)
-            ->get()->getResultArray();
+            ->whereIn($this->foreignKey, $localIds);
+
+        if ($this->morphTypeKey !== '') {
+            $builder->where($this->morphTypeKey, $localAlias);
+        }
+
+        $rows = $builder->get()->getResultArray();
 
         $this->relatedModel->reset();
 
@@ -313,6 +388,44 @@ class EntityRelation
     public function eagerLoad(array $entities, ?\Closure $dynamicConstraint = null): void
     {
         if (empty($entities)) {
+            return;
+        }
+
+        if ($this->type === 'morph-to') {
+            // Group local entities by their runtime morph_type so each alias gets one batch query
+            $grouped = [];
+
+            foreach ($entities as $entity) {
+                $morphId   = $entity->getAttribute($this->foreignKey);
+                $morphType = $entity->getAttribute($this->morphTypeKey);
+
+                if (empty($morphId) or empty($morphType)) {
+                    $entity->setAttribute($this->relationName, null);
+                    $entity->flushChanges();
+                    continue;
+                }
+
+                $grouped[$morphType][$morphId][] = $entity;
+            }
+
+            foreach ($grouped as $alias => $entitiesByMorphId) {
+                $relatedModel = $this->registry->getModel($alias);
+                $relatedByKey = [];
+
+                foreach ($relatedModel->findMany(array_keys($entitiesByMorphId)) as $related) {
+                    $relatedByKey[$related->getAttribute($related->getFields()->getPrimaryKey())] = $related;
+                }
+
+                foreach ($entitiesByMorphId as $morphId => $parentEntities) {
+                    $related = $relatedByKey[$morphId] ?? null;
+
+                    foreach ($parentEntities as $parentEntity) {
+                        $parentEntity->setAttribute($this->relationName, $related);
+                        $parentEntity->flushChanges();
+                    }
+                }
+            }
+
             return;
         }
 
@@ -353,46 +466,16 @@ class EntityRelation
         }
 
         if ($this->type === 'belongs-many') {
-            $pivotConfig = $this->registry->getPivotConfig($entities[0]->getAlias(), $this->relatedAlias);
+            $pivot = $this->registry->getPivotConfig($entities[0]->getAlias(), $this->relatedAlias);
+            $this->eagerLoadPivot($entities, $localIds, $pivot['table'], $pivot['local_column'], $pivot['foreign_column'], $dynamicConstraint);
 
-            if (empty($pivotConfig)) {
-                return;
-            }
+            return;
+        }
 
-            $builder = $this->relatedModel->builder();
-
-            $this->relatedModel->handleDeleted();
-
-            $builder
-                ->select("{$this->relatedTable}.*, {$pivotConfig['table']}.{$pivotConfig['local_column']} AS __pivot_local_key")
-                ->join($pivotConfig['table'], "{$pivotConfig['table']}.{$pivotConfig['foreign_column']} = {$this->relatedTable}.{$this->foreignKey}")
-                ->whereIn("{$pivotConfig['table']}.{$pivotConfig['local_column']}", $localIds);
-
-            if ($dynamicConstraint) {
-                $dynamicConstraint($builder);
-            }
-
-            if ($this->constraint) {
-                $this->applyConstraints($builder);
-            }
-
-            $rows = $builder->get()->getResultArray();
-
-            $this->relatedModel->reset();
-
-            $relatedByParentId = [];
-
-            foreach ($rows as $row) {
-                $parentId = (string) $row['__pivot_local_key'];
-                unset($row['__pivot_local_key']);
-                $relatedByParentId[$parentId][] = $this->relatedModel->hydrateRow($row);
-            }
-
-            foreach ($entities as $parentEntity) {
-                $parentId = (string) $this->getLocalId($parentEntity);
-                $parentEntity->setAttribute($this->relationName, $relatedByParentId[$parentId] ?? []);
-                $parentEntity->flushChanges();
-            }
+        if ($this->type === 'morph-belongs-many') {
+            $alias = $entities[0]->getAlias();
+            $pivot = $this->registry->getPivotConfig($alias, $this->relatedAlias);
+            $this->eagerLoadPivot($entities, $localIds, $pivot['table'], $this->morphKey, $this->foreignKey, $dynamicConstraint, $alias);
 
             return;
         }
@@ -409,6 +492,11 @@ class EntityRelation
 
         if ($dynamicConstraint) {
             $dynamicConstraint($builder);
+        }
+
+        // morph-one / morph-many: scope to the parent entity type
+        if (in_array($this->type, ['morph-one', 'morph-many'], true)) {
+            $builder->where($this->morphTypeKey, $entities[0]->getAlias());
         }
 
         $relatedRecords = $builder->whereIn($keyToMatch, $localIds)->get()->getResultArray();
@@ -436,6 +524,55 @@ class EntityRelation
 
             $matched = $relatedByKey[$parentId] ?? [];
             $parentEntity->setAttribute($this->relationName, $this->isMultiple ? $matched : ($matched[0] ?? null));
+            $parentEntity->flushChanges();
+        }
+    }
+
+    /**
+     * Shared pivot eager-load logic for belongs-many and morph-belongs-many.
+     *
+     * @param string $pivotLocalCol   Pivot column holding the parent ID (used for WHERE IN and grouping)
+     * @param string $pivotForeignCol Pivot column holding the related entity ID (used for the JOIN)
+     * @param string $morphTypeAlias  Non-empty for morph-belongs-many — adds AND pivot.morph_type = alias
+     */
+    protected function eagerLoadPivot(array $entities, array $localIds, string $pivotTable, string $pivotLocalCol, string $pivotForeignCol, ?\Closure $dynamicConstraint, string $morphTypeAlias = ''): void
+    {
+        $builder = $this->relatedModel->builder();
+
+        $this->relatedModel->handleDeleted();
+
+        $builder
+            ->select("{$this->relatedTable}.*, {$pivotTable}.{$pivotLocalCol} AS __pivot_local_key")
+            ->join($pivotTable, "{$pivotTable}.{$pivotForeignCol} = {$this->relatedTable}.{$this->relatedKey}")
+            ->whereIn("{$pivotTable}.{$pivotLocalCol}", $localIds);
+
+        if ($morphTypeAlias !== '') {
+            $builder->where("{$pivotTable}.{$this->morphTypeKey}", $morphTypeAlias);
+        }
+
+        if ($dynamicConstraint) {
+            $dynamicConstraint($builder);
+        }
+
+        if ($this->constraint) {
+            $this->applyConstraints($builder);
+        }
+
+        $rows = $builder->get()->getResultArray();
+
+        $this->relatedModel->reset();
+
+        $relatedByParentId = [];
+
+        foreach ($rows as $row) {
+            $parentId = (string) $row['__pivot_local_key'];
+            unset($row['__pivot_local_key']);
+            $relatedByParentId[$parentId][] = $this->relatedModel->hydrateRow($row);
+        }
+
+        foreach ($entities as $parentEntity) {
+            $parentId = (string) $this->getLocalId($parentEntity);
+            $parentEntity->setAttribute($this->relationName, $relatedByParentId[$parentId] ?? []);
             $parentEntity->flushChanges();
         }
     }
@@ -501,16 +638,26 @@ class EntityRelation
 
     protected function buildBelongsManyQuery(EntityInterface $localEntity, int|string|null $localId): void
     {
-        $pivotConfig = $this->registry->getPivotConfig($localEntity->getAlias(), $this->relatedAlias);
-
-        if (empty($pivotConfig)) {
-            throw EntityException::pivotNotDefined($this->relationName);
-        }
+        $pivot = $this->registry->getPivotConfig($localEntity->getAlias(), $this->relatedAlias);
 
         $this->relatedModel->builder()
             ->select("{$this->relatedTable}.*")
-            ->join($pivotConfig['table'], "{$pivotConfig['table']}.{$pivotConfig['foreign_column']} = {$this->relatedTable}.{$this->foreignKey}")
-            ->where("{$pivotConfig['table']}.{$pivotConfig['local_column']}", $localId);
+            ->join($pivot['table'], "{$pivot['table']}.{$pivot['foreign_column']} = {$this->relatedTable}.{$this->foreignKey}")
+            ->where("{$pivot['table']}.{$pivot['local_column']}", $localId);
+    }
+
+    /**
+     * Build query for morph-belongs-many: JOIN pivot on morph_id + morph_type, then JOIN related
+     */
+    protected function buildMorphBelongsManyQuery(EntityInterface $localEntity, int|string|null $localId): void
+    {
+        $pivot = $this->registry->getPivotConfig($localEntity->getAlias(), $this->relatedAlias);
+
+        $this->relatedModel->builder()
+            ->select("{$this->relatedTable}.*")
+            ->join($pivot['table'], "{$pivot['table']}.{$this->foreignKey} = {$this->relatedTable}.{$this->relatedKey}")
+            ->where("{$pivot['table']}.{$this->morphKey}", $localId)
+            ->where("{$pivot['table']}.{$this->morphTypeKey}", $localEntity->getAlias());
     }
 
     /**
@@ -646,12 +793,8 @@ class EntityRelation
      */
     protected function updateBelongsMany(EntityInterface $localEntity, array|null|EntityInterface $relatedData): void
     {
-        $localId     = $this->getLocalId($localEntity);
-        $pivotConfig = $this->registry->getPivotConfig($localEntity->getAlias(), $this->relatedAlias);
-
-        if (empty($pivotConfig)) {
-            throw EntityException::pivotNotDefined($this->relationName);
-        }
+        $localId = $this->getLocalId($localEntity);
+        $pivot   = $this->registry->getPivotConfig($localEntity->getAlias(), $this->relatedAlias);
 
         // Trust resolver to format arrays, scalars, and entities consistently
         $entities = empty($relatedData) ? [] : $this->resolveMany($relatedData);
@@ -667,8 +810,122 @@ class EntityRelation
                 $newIds[] = $id;
             }
         }
+        $this->syncPivot($pivot['table'], $pivot['local_column'], $pivot['foreign_column'], $localId, array_unique($newIds));
+    }
 
-        $this->syncPivot($pivotConfig['table'], $pivotConfig['local_column'], $pivotConfig['foreign_column'], $localId, array_unique($newIds));
+    /**
+     * Update entity for the morph-one relation (like has-one but stamps morph_type on the child)
+     */
+    protected function updateMorphOne(EntityInterface $localEntity, array|null|EntityInterface $relatedData): void
+    {
+        $localId    = $this->getLocalId($localEntity);
+        $localAlias = $localEntity->getAlias();
+
+        if (empty($localId)) {
+            return;
+        }
+
+        $entity = $this->resolveOne($relatedData);
+
+        if ($entity instanceof EntityInterface) {
+            $entity->setAttribute($this->foreignKey, $localId);
+            $entity->setAttribute($this->morphTypeKey, $localAlias);
+            $this->relatedModel->save($entity);
+
+            $entityId   = $entity->getAttribute($this->relatedKey);
+            $excludeIds = empty($entityId) ? [] : [$entityId];
+
+            $this->detachMorphOrphans($this->foreignKey, $this->morphTypeKey, $localId, $localAlias, $excludeIds);
+        } else {
+            $this->detachMorphOrphans($this->foreignKey, $this->morphTypeKey, $localId, $localAlias);
+        }
+    }
+
+    /**
+     * Update entity list for the morph-many relation (like has-many but stamps morph_type on each child)
+     */
+    protected function updateMorphMany(EntityInterface $localEntity, array|null|EntityInterface $relatedData): void
+    {
+        $localId    = $this->getLocalId($localEntity);
+        $localAlias = $localEntity->getAlias();
+
+        if (empty($localId)) {
+            return;
+        }
+
+        if (empty($relatedData)) {
+            $this->detachMorphOrphans($this->foreignKey, $this->morphTypeKey, $localId, $localAlias);
+            return;
+        }
+
+        $entities  = $this->resolveMany($relatedData);
+        $entityIds = [];
+
+        foreach ($entities as $entity) {
+            $entity->setAttribute($this->foreignKey, $localId);
+            $entity->setAttribute($this->morphTypeKey, $localAlias);
+            $this->relatedModel->save($entity);
+
+            $entityId = $entity->getAttribute($this->relatedKey);
+
+            if (!empty($entityId)) {
+                $entityIds[] = $entityId;
+            }
+        }
+
+        $this->detachMorphOrphans($this->foreignKey, $this->morphTypeKey, $localId, $localAlias, $entityIds);
+    }
+
+    /**
+     * Update morph-to relation: stamp morph_id and morph_type onto the local entity (like belongs-one but two columns)
+     */
+    protected function updateMorphTo(EntityInterface $localEntity, array|null|EntityInterface $relatedData): void
+    {
+        if ($relatedData !== null and !$relatedData instanceof EntityInterface) {
+            throw EntityException::invalidValue($this->relationName, 'EntityInterface');
+        }
+
+        if ($relatedData === null) {
+            $localEntity->setAttribute($this->foreignKey, null);
+            $localEntity->setAttribute($this->morphTypeKey, null);
+            return;
+        }
+
+        $relatedAlias  = $relatedData->getAlias();
+        $relatedFields = $this->registry->getEntityFields($relatedAlias);
+        $relatedPk     = $relatedFields->getPrimaryKey();
+        $relatedId     = $relatedData->getAttribute($relatedPk);
+
+        if (empty($relatedId) or $relatedData->hasChanged()) {
+            $this->registry->getModel($relatedAlias)->save($relatedData);
+            $relatedId = $relatedData->getAttribute($relatedPk);
+        }
+
+        $localEntity->setAttribute($this->foreignKey, $relatedId);
+        $localEntity->setAttribute($this->morphTypeKey, $relatedAlias);
+    }
+
+    /**
+     * Sync pivot records for morph-belongs-many (like belongs-many but pivot has morph_id + morph_type)
+     */
+    protected function updateMorphBelongsMany(EntityInterface $localEntity, array|null|EntityInterface $relatedData): void
+    {
+        $localId    = $this->getLocalId($localEntity);
+        $localAlias = $localEntity->getAlias();
+        $pivot      = $this->registry->getPivotConfig($localAlias, $this->relatedAlias);
+
+        $entities = empty($relatedData) ? [] : $this->resolveMany($relatedData);
+        $newIds   = [];
+
+        foreach ($entities as $entity) {
+            $id = $entity->getAttribute($this->relatedKey);
+
+            if (!empty($id)) {
+                $newIds[] = $id;
+            }
+        }
+
+        $this->syncPivot($pivot['table'], $this->morphKey, $this->foreignKey, $localId, array_unique($newIds), $this->morphTypeKey, $localAlias);
     }
 
     /**
@@ -706,11 +963,8 @@ class EntityRelation
             return;
         }
 
-        $pivotConfig = $this->registry->getPivotConfig($localAlias, $this->relatedAlias);
-
-        if (!empty($pivotConfig)) {
-            $this->syncPivot($pivotConfig['table'], $pivotConfig['local_column'], $pivotConfig['foreign_column'], $localId, []);
-        }
+        $pivot = $this->registry->getPivotConfig($localAlias, $this->relatedAlias);
+        $this->syncPivot($pivot['table'], $pivot['local_column'], $pivot['foreign_column'], $localId, []);
     }
 
     /**
@@ -836,29 +1090,75 @@ class EntityRelation
     }
 
     /**
+     * Like detachOrphans() but clears both morph_id and morph_type columns,
+     * and scopes the WHERE to the specific entity type.
+     */
+    protected function detachMorphOrphans(string $morphIdCol, string $morphTypeCol, int|string $localId, string $localAlias, array $excludeIds = []): void
+    {
+        $builder = $this->relatedModel->builder()
+            ->where($morphIdCol, $localId)
+            ->where($morphTypeCol, $localAlias);
+
+        if (!empty($excludeIds)) {
+            $builder->whereNotIn($this->relatedKey, array_unique($excludeIds));
+        }
+
+        $builder->delete();
+        $this->relatedModel->reset();
+
+        $this->relatedModel->removeFromCacheWhere($morphIdCol, $localId, $excludeIds);
+    }
+
+    /**
      * Synchronize or detach pivot records.
      * Passing an empty $foreignIds array will detach all records for the given $localId(s).
+     * When $morphTypeColumn and $morphTypeAlias are provided, a morph-type condition is added
+     * to all queries and the morph-type column is included in every INSERT row.
      */
-    protected function syncPivot(string $pivotTable, string $localColumn, string $foreignColumn, int|string|array $localId, array $foreignIds = []): void
+    protected function syncPivot(string $pivotTable, string $localColumn, string $foreignColumn, int|string|array $localId, array $foreignIds = [], string $morphTypeColumn = '', string $morphTypeAlias = ''): void
     {
         if (empty($localId)) {
             return;
+        }
+
+        // Prevent invalid bulk-sync attempts
+        if (is_array($localId) and !empty($foreignIds)) {
+            throw new \InvalidArgumentException("Cannot sync multiple foreign IDs to multiple local IDs simultaneously. Array of local IDs is only permitted for bulk detaching.");
         }
 
         $builder = $this->relatedModel->builder($pivotTable);
 
         // If no foreign IDs are provided, this acts as a full detach
         if (empty($foreignIds)) {
-            is_array($localId) ? $builder->whereIn($localColumn, $localId) : $builder->where($localColumn, $localId);
+
+            if (is_array($localId)) {
+                $builder->whereIn($localColumn, $localId);
+            } else {
+                $builder->where($localColumn, $localId);
+            }
+
+            if ($morphTypeColumn !== '') {
+                $builder->where($morphTypeColumn, $morphTypeAlias);
+            }
+
             $builder->delete();
             $this->relatedModel->reset();
             return;
         }
 
-        // Fetch current pivot relationships
-        $currentRecords = $builder->select($foreignColumn)
-            ->where($localColumn, $localId)
-            ->get()->getResultArray();
+        $currentBuilder = $builder->select($foreignColumn);
+
+        if (is_array($localId)) {
+            $currentBuilder->whereIn($localColumn, $localId);
+        } else {
+            $currentBuilder->where($localColumn, $localId);
+        }
+
+        if ($morphTypeColumn !== '') {
+            $currentBuilder->where($morphTypeColumn, $morphTypeAlias);
+        }
+
+        $currentRecords = $currentBuilder->get()->getResultArray();
 
         $this->relatedModel->reset();
 
@@ -870,10 +1170,15 @@ class EntityRelation
 
         // Detach old IDs
         if (!empty($idsToDetach)) {
-            $this->relatedModel->builder($pivotTable)
+            $detachBuilder = $this->relatedModel->builder($pivotTable)
                 ->where($localColumn, $localId)
-                ->whereIn($foreignColumn, $idsToDetach)
-                ->delete();
+                ->whereIn($foreignColumn, $idsToDetach);
+
+            if ($morphTypeColumn !== '') {
+                $detachBuilder->where($morphTypeColumn, $morphTypeAlias);
+            }
+
+            $detachBuilder->delete();
             $this->relatedModel->reset();
         }
 
@@ -881,10 +1186,13 @@ class EntityRelation
         if (!empty($idsToAttach)) {
             $insertData = [];
             foreach ($idsToAttach as $id) {
-                $insertData[] = [
-                    $localColumn   => $localId,
-                    $foreignColumn => $id
-                ];
+                $row = [$localColumn => $localId, $foreignColumn => $id];
+
+                if ($morphTypeColumn !== '') {
+                    $row[$morphTypeColumn] = $morphTypeAlias;
+                }
+
+                $insertData[] = $row;
             }
             $this->relatedModel->builder($pivotTable)->ignore(true)->insertBatch($insertData);
             $this->relatedModel->reset();
