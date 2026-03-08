@@ -3,6 +3,14 @@
 namespace App\Core\Entity;
 
 use App\Core\Container\Container;
+use App\Core\Entity\Relations\RelationInterface;
+use App\Core\Entity\Relations\HasRelation;
+use App\Core\Entity\Relations\BelongsOneRelation;
+use App\Core\Entity\Relations\BelongsManyRelation;
+use App\Core\Entity\Relations\MorphRelation;
+use App\Core\Entity\Relations\MorphToRelation;
+use App\Core\Entity\Relations\MetaRelation;
+
 use App\Core\Libraries\Sanitizer;
 use CodeIgniter\DataCaster\Cast\CastInterface;
 use DateTimeInterface;
@@ -40,6 +48,18 @@ class EntityFields
         'datetime'    => 'Y-m-d H:i:s',
         'datetime-ms' => 'Y-m-d H:i:s.v',
         'datetime-us' => 'Y-m-d H:i:s.u',
+    ];
+
+    protected const RELATION_TYPES = [
+        'has-one'            => HasRelation::class,
+        'has-many'           => HasRelation::class,
+        'belongs-one'        => BelongsOneRelation::class,
+        'belongs-many'       => BelongsManyRelation::class,
+        'morph-one'          => MorphRelation::class,
+        'morph-many'         => MorphRelation::class,
+        'morph-to'           => MorphToRelation::class,
+        'morph-belongs-many' => BelongsManyRelation::class,
+        'meta'               => MetaRelation::class,
     ];
 
     /**
@@ -340,14 +360,21 @@ class EntityFields
             throw EntityException::missingRelationType($key);
         }
 
-        if (!in_array($type, ['has-one', 'has-many', 'belongs-one', 'belongs-many', 'meta', 'morph-one', 'morph-many', 'morph-to', 'morph-belongs-many'], true)) {
-            throw EntityException::unsupportedRelationType($key, $type);
+        $isBuiltinClass = isset(self::RELATION_TYPES[$type]);
+
+        if ($isBuiltinClass) {
+            $class = self::RELATION_TYPES[$type];
+        } else {
+            if (!class_exists($type) or !is_subclass_of($type, RelationInterface::class)) {
+                throw EntityException::unsupportedRelationType($key, $type);
+            }
+            $class = $type;
         }
 
-        // entity is required for all types; morph-to is the only exception (resolved dynamically at runtime)
+        // entity is required for built-in types; morph-to and custom classes resolve it dynamically
         $entity = $relation['entity'] ?? '';
 
-        if (!is_string($entity) or ($type !== 'morph-to' and empty($entity))) {
+        if (!is_string($entity) or ($isBuiltinClass and $type !== 'morph-to' and empty($entity))) {
             throw EntityException::missingRelationAlias($key);
         }
 
@@ -355,7 +382,7 @@ class EntityFields
         $foreignKey = (!empty($relation['foreign_key']) and is_string($relation['foreign_key'])) ? $relation['foreign_key'] : '';
         $morphKey   = '';
 
-        if (str_starts_with($type, 'morph-')) {
+        if ($isBuiltinClass and str_starts_with($type, 'morph-')) {
             $morphKey = $relation['morph_key'] ?? '';
 
             if (empty($morphKey) or !is_string($morphKey)) {
@@ -376,7 +403,7 @@ class EntityFields
             throw EntityException::invalidLocalKey($key, $localKey);
         }
 
-        if ($type === 'belongs-one' and !empty($foreignKey) and !isset($this->fields[$foreignKey])) {
+        if ($isBuiltinClass and $type === 'belongs-one' and !empty($foreignKey) and !isset($this->fields[$foreignKey])) {
             throw EntityException::invalidForeignKey($key, $foreignKey);
         }
 
@@ -386,11 +413,12 @@ class EntityFields
 
         $this->relationData[$key] = [
             'type'        => $type,
+            'class'       => $class,
             'entity'      => $entity,
             'local_key'   => $localKey,
             'foreign_key' => $foreignKey,
             'morph_key'   => $morphKey,
-            'constraint'  => $relation['constraint']  ?? [],
+            'constraint'  => $relation['constraint'] ?? [],
             'cascade'     => (bool) ($relation['cascade'] ?? false),
         ];
     }
@@ -406,7 +434,7 @@ class EntityFields
     /**
      * Get a relation object
      */
-    public function getRelation(string $key): EntityRelation
+    public function getRelation(string $key): RelationInterface
     {
         if (isset($this->relations[$key])) {
             return $this->relations[$key];
@@ -416,9 +444,11 @@ class EntityFields
             throw EntityException::undefinedRelation($key);
         }
 
-        $relation = $this->container->make(EntityRelation::class, [
+        $data = $this->relationData[$key];
+
+        $relation = $this->container->make($data['class'], [
             'name'     => $key,
-            'relation' => $this->relationData[$key],
+            'relation' => $data,
         ]);
 
         $this->relations[$key] = $relation;

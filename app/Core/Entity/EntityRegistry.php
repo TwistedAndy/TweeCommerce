@@ -10,7 +10,6 @@ use \Config\Entities;
 class EntityRegistry
 {
     protected array     $config;
-    protected array     $models = [];
     protected array     $fields = [];
     protected Container $container;
 
@@ -76,24 +75,14 @@ class EntityRegistry
     /**
      * Get the Entity Model object
      */
-    public function getModel(string $alias, bool $getShared = true): EntityModel
+    public function getModel(string $alias): EntityModel
     {
-        if ($getShared and !empty($this->models[$alias])) {
-            return $this->models[$alias];
-        }
-
         $config = $this->getConfig($alias);
 
-        $model = $this->container->make($config['model'], [
+        return $this->container->make($config['model'], [
             'alias'    => $alias,
             'registry' => $this
         ], static::class);
-
-        if ($getShared) {
-            $this->models[$alias] = $model;
-        }
-
-        return $model;
     }
 
     /**

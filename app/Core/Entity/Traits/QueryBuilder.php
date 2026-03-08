@@ -3,7 +3,7 @@
 namespace App\Core\Entity\Traits;
 
 use App\Core\Entity\EntityException;
-use App\Core\Entity\EntityRelation;
+use App\Core\Entity\Relations\RelationInterface;
 use CodeIgniter\Database\BaseBuilder;
 use CodeIgniter\Database\ResultInterface;
 use DateTimeInterface;
@@ -54,15 +54,18 @@ trait QueryBuilder
     ];
 
     /**
-     * Execute a COUNT(*) query with all current WHERE and JOIN conditions applied.
-     * Pass $reset = false to keep conditions in place for a subsequent findAll().
+     * Execute the current query and return raw results.
      *
-     *   $model->where('active', 1)->countAllResults();
-     *   $model->where('active', 1)->countAllResults(false);
+     *   $model->where('active', 1)->get()
+     *   $model->select('id, title')->get(10, 20)
      */
     public function get(?int $limit = null, int $offset = 0): ResultInterface
     {
-        return $this->builder->get($limit, $offset);
+        $this->handleDeleted();
+        $result = $this->builder->get($limit, $offset);
+        $this->reset();
+
+        return $result;
     }
 
     /**
@@ -1265,7 +1268,11 @@ trait QueryBuilder
      */
     public function increment(string $column, int $value = 1): bool
     {
-        return $this->builder->increment($column, $value);
+        $this->handleDeleted();
+        $result = $this->builder->increment($column, $value);
+        $this->reset();
+
+        return $result;
     }
 
     /**
@@ -1277,12 +1284,25 @@ trait QueryBuilder
      */
     public function decrement(string $column, int $value = 1): bool
     {
-        return $this->builder->decrement($column, $value);
+        $this->handleDeleted();
+        $result = $this->builder->decrement($column, $value);
+        $this->reset();
+
+        return $result;
     }
 
-    public function countAllResults(bool $reset = true): int
+    /**
+     * Execute a COUNT(*) with all current WHERE conditions applied, respecting soft deletes.
+     *
+     *   $model->where('active', 1)->countAllResults()
+     */
+    public function countAllResults(): int
     {
-        return (int) $this->builder->countAllResults($reset);
+        $this->handleDeleted();
+        $count = (int) $this->builder->countAllResults(true);
+        $this->reset();
+
+        return $count;
     }
 
     /**
@@ -1593,9 +1613,9 @@ trait QueryBuilder
     }
 
     /**
-     * LEFT JOIN the given relation into the current query (once) and return its EntityRelation.
+     * LEFT JOIN the given relation into the current query (once) and return its RelationInterface.
      */
-    protected function joinRelation(string $key, string $column = ''): EntityRelation
+    protected function joinRelation(string $key, string $column = ''): RelationInterface
     {
         if (!isset($this->relations[$key])) {
             throw EntityException::undefinedRelation($key);

@@ -11,7 +11,6 @@ use CodeIgniter\Database\BaseConnection;
 use CodeIgniter\Pager\PagerInterface;
 use CodeIgniter\Validation\ValidationInterface;
 
-use BadMethodCallException;
 
 /**
  * Entity Model
@@ -112,31 +111,6 @@ class EntityModel
 
         $this->initCache($this->alias);
 
-    }
-
-    public function __invoke(): BaseBuilder
-    {
-        return $this->builder;
-    }
-
-    /**
-     * Proxies missing methods directly to the native CI4 Query Builder.
-     *
-     * @return $this|array<int|string, mixed>|BaseBuilder|bool|float|int|object|string|null
-     */
-    public function __call(string $name, array $params)
-    {
-        if (method_exists($this->builder, $name)) {
-            $result = $this->builder->{$name}(...$params);
-        } else {
-            throw new BadMethodCallException('Call to undefined method ' . static::class . '::' . $name);
-        }
-
-        if ($result instanceof BaseBuilder) {
-            return $this;
-        }
-
-        return $result;
     }
 
     /**

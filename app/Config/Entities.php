@@ -1,6 +1,6 @@
 <?php
 
-namespace App\Config;
+namespace Config;
 
 use App\Core\Entities\Comment;
 use App\Core\Entities\Post;
