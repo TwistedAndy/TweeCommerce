@@ -28,7 +28,7 @@ class EntityRelation
     public function __construct(string $name, array $relation, EntityRegistry $registry)
     {
         if (empty($relation['entity'])) {
-            throw new EntityException('A related entity alias is not specified');
+            throw EntityException::missingRelationAlias($name);
         }
 
         $this->registry = $registry;
@@ -113,7 +113,7 @@ class EntityRelation
             'has-many' => $this->updateHasMany($localId, $relatedData),
             'belongs-one' => $this->updateBelongsOne($localEntity, $relatedData),
             'belongs-many' => $this->updateBelongsMany($localEntity, $relatedData),
-            default => throw new EntityException("Update not supported for: {$this->type}")
+            default => throw EntityException::unsupportedType($this->type, 'update')
         };
     }
 
@@ -184,7 +184,7 @@ class EntityRelation
                 break;
 
             default:
-                throw new EntityException("Relation type '{$this->type}' is not supported for query filtering.");
+                throw EntityException::unsupportedType($this->type, 'join');
         }
     }
 
@@ -211,7 +211,7 @@ class EntityRelation
                 $this->getForeignId($localEntity)
             ),
             'belongs-many' => $this->buildBelongsManyQuery($localEntity, $localId),
-            default => throw new EntityException("Unknown relation type: {$this->type}")
+            default => throw EntityException::unsupportedType($this->type, 'query')
         };
 
         if ($this->constraint) {
@@ -484,7 +484,7 @@ class EntityRelation
                 // Standard PHP Callable (Global function, Static 'Class::method', or ['Class', 'method'])
                 call_user_func($callback, $builder, $this->relatedModel);
             } else {
-                throw new EntityException("The relation callback is invalid. It must be an existing model method or a valid PHP callable.");
+                throw EntityException::invalidCallback($this->relationName);
             }
         }
     }
@@ -512,7 +512,7 @@ class EntityRelation
         $pivotConfig = $this->registry->getPivotConfig($localEntity->getAlias(), $this->relatedAlias);
 
         if (empty($pivotConfig)) {
-            throw new EntityException("Pivot config not defined for the {$this->relatedAlias} relation.");
+            throw EntityException::pivotNotDefined($this->relationName);
         }
 
         $this->relatedModel->builder()
@@ -529,7 +529,7 @@ class EntityRelation
         $localId = $localEntity->getAttribute($this->localKey);
 
         if (empty($localId)) {
-            throw new EntityException('Parent entity must be saved before updating meta.');
+            throw EntityException::parentNotSaved($this->relationName);
         }
 
         // Fetch existing meta object or create a blank one
@@ -656,7 +656,7 @@ class EntityRelation
         $pivotConfig = $this->registry->getPivotConfig($localEntity->getAlias(), $this->relatedAlias);
 
         if (empty($pivotConfig)) {
-            throw new EntityException("Pivot config not defined for the {$this->relatedAlias} relation.");
+            throw EntityException::pivotNotDefined($this->relationName);
         }
 
         // Trust resolver to format arrays, scalars, and entities consistently
@@ -730,19 +730,19 @@ class EntityRelation
 
         // Catch sequential arrays passed to a singular relation
         if (is_array($value) and array_is_list($value)) {
-            throw new EntityException(sprintf('Relation "%s" expects a single ID, associative array, or %s instance. Sequential array provided.', $this->relatedClass, $this->relatedClass));
+            throw EntityException::sequentialArray($this->relationName, $this->relatedClass);
         }
 
         if ($value instanceof EntityInterface) {
             if (!$value instanceof $this->relatedClass) {
-                throw new EntityException(sprintf('Relation expects instance of %s, but got %s.', $this->relatedClass, get_class($value)));
+                throw EntityException::typeMismatch($this->relatedClass, get_class($value));
             }
             return $value;
         }
 
         // If it's a scalar ID, fetch it from the database/cache
         if (is_scalar($value)) {
-            return $this->relatedModel->find($value) ?? throw new EntityException("Could not find related {$this->relatedClass} with ID {$value}");
+            return $this->relatedModel->find($value) ?? throw EntityException::relatedNotFound($this->relatedClass, $value);
         }
 
         // If it's an associative array, either update an existing record or create a new one
@@ -763,7 +763,7 @@ class EntityRelation
             return $entity;
         }
 
-        throw new EntityException(sprintf('Invalid data type for relation "%s". Expected ID, associative array, or %s instance.', $this->relatedClass, $this->relatedClass));
+        throw EntityException::invalidValue($this->relationName, $this->relatedClass);
     }
 
     /**
@@ -781,7 +781,7 @@ class EntityRelation
         }
 
         if (!is_array($value)) {
-            throw new EntityException(sprintf('Relation "%s" expects an array of IDs, data arrays, or %s instances.', $this->relatedClass, $this->relatedClass));
+            throw EntityException::invalidManyValue($this->relationName, $this->relatedClass);
         }
 
         $entities   = [];
@@ -791,7 +791,7 @@ class EntityRelation
         foreach ($value as $item) {
             if ($item instanceof EntityInterface) {
                 if (!$item instanceof $this->relatedClass) {
-                    throw new EntityException(sprintf('Relation expects instance of %s, but got %s.', $this->relatedClass, get_class($item)));
+                    throw EntityException::typeMismatch($this->relatedClass, get_class($item));
                 }
                 $entities[] = $item;
             } elseif (is_array($item) and !array_is_list($item)) {
@@ -810,7 +810,7 @@ class EntityRelation
                 // Batch all simple IDs to fetch them in a single optimized query later
                 $idsToFetch[] = $item;
             } else {
-                throw new EntityException(sprintf('Invalid item type in relation "%s". Expected ID, associative array, or %s instance.', $this->relatedClass, $this->relatedClass));
+                throw EntityException::invalidItem($this->relationName, $this->relatedClass);
             }
         }
 

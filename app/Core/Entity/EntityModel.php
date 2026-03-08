@@ -57,7 +57,7 @@ class EntityModel
         $fields = $registry->getEntityFields($alias);
 
         if ($fields === null) {
-            throw new EntityException('There is no entity with specified alias: ' . $alias);
+            throw EntityException::unknownAlias($alias);
         }
 
         $this->alias    = $alias;
@@ -336,7 +336,7 @@ class EntityModel
             if ($useTransaction) {
                 $this->db->transRollback();
             }
-            throw new EntityException('Failed to insert entity: ' . $e->getMessage(), 0, $e);
+            throw EntityException::operationFailed('insert', $e);
         }
     }
 
@@ -398,7 +398,7 @@ class EntityModel
             if ($useTransaction) {
                 $this->db->transRollback();
             }
-            throw new EntityException('Failed to update entity: ' . $e->getMessage(), 0, $e);
+            throw EntityException::operationFailed('update', $e);
         }
     }
 
@@ -454,7 +454,7 @@ class EntityModel
             if ($useTransaction) {
                 $this->db->transRollback();
             }
-            throw new EntityException('Failed to delete entity: ' . $e->getMessage(), 0, $e);
+            throw EntityException::operationFailed('delete', $e);
         }
     }
 
@@ -502,7 +502,7 @@ class EntityModel
                 $this->db->transRollback();
             }
 
-            throw new EntityException('Failed to restore entity: ' . $e->getMessage(), 0, $e);
+            throw EntityException::operationFailed('restore', $e);
         }
     }
 

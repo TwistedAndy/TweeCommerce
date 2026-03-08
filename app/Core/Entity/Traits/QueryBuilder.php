@@ -1595,7 +1595,7 @@ trait QueryBuilder
     protected function joinRelation(string $key, string $column = ''): EntityRelation
     {
         if (!isset($this->relations[$key])) {
-            throw new EntityException("Relation '{$key}' is not defined.");
+            throw EntityException::undefinedRelation($key);
         }
 
         $relation = $this->fields->getRelation($key);

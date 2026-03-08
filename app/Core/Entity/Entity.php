@@ -40,6 +40,7 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
 
         $fields = $container->make(EntityFields::class, [
             'fields'    => $class::getEntityFields(),
+            'entity'    => $class,
             'container' => $container,
         ], $class);
 

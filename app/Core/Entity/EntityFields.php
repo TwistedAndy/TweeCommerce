@@ -16,6 +16,7 @@ class EntityFields
     protected Container $container;
     protected Sanitizer $sanitizer;
 
+    protected string $entity     = '';
     protected string $primaryKey = '';
     protected string $createdKey = '';
     protected string $updatedKey = '';
@@ -72,26 +73,28 @@ class EntityFields
      *     foreign_key?: string,
      *   },
      * }> $fields
+     * @param class-string<EntityInterface> $entity
      * @param Container $container
      * @param Sanitizer $sanitizer
      */
-    public function __construct(array $fields, Container $container, Sanitizer $sanitizer)
+    public function __construct(array $fields, string $entity, Container $container, Sanitizer $sanitizer)
     {
         $this->container = $container;
         $this->sanitizer = $sanitizer;
+        $this->entity    = $entity;
 
         foreach ($fields as $key => $field) {
             $this->addField($key, $field);
         }
 
         if (empty($this->primaryKey)) {
-            throw new EntityException('No primary key is specified for an entity');
+            throw EntityException::noPrimaryKey($entity);
         }
 
         foreach ($this->fields as $key => $field) {
             if ($field['type'] === 'relation') {
                 if (empty($field['relation']) or !is_array($field['relation'])) {
-                    throw new EntityException('An entity relation field requires relation data specified');
+                    throw EntityException::missingRelationConfig($key);
                 }
 
                 $this->addRelation($key, $field['relation']);
@@ -131,18 +134,18 @@ class EntityFields
     public function addField(string $key, array $field): void
     {
         if (isset($this->fields[$key])) {
-            throw new EntityException("A field '{$key}' is already defined");
+            throw EntityException::duplicateField($key);
         }
 
         if (empty($field['type'])) {
             $field['type'] = 'text';
         } elseif (!is_string($field['type'])) {
-            throw new EntityException('A provided type should be a valid cast string');
+            throw EntityException::invalidCastType($key);
         }
 
         if (!empty($field['primary'])) {
             if ($this->primaryKey) {
-                throw new EntityException('There should be only one entity field marked as a primary key');
+                throw EntityException::multiplePrimaryKeys($this->primaryKey, $key);
             }
 
             $this->primaryKey = $key;
@@ -167,7 +170,7 @@ class EntityFields
             }
 
             if (!class_exists($cast) or !is_subclass_of($cast, CastInterface::class)) {
-                throw new EntityException("A provided cast handler '$cast' should implement the CastInterface interface");
+                throw EntityException::invalidCastHandler($cast);
             }
 
             if ($isNullable) {
@@ -212,7 +215,7 @@ class EntityFields
             }
 
             if (!is_array($field['rules']) or empty($field['rules']['rules'])) {
-                throw new EntityException("Failed to initialize field rules for '{$key}'");
+                throw EntityException::invalidFieldRules($key);
             }
 
             if (!empty($field['errors']) and is_array($field['errors'])) {
@@ -330,19 +333,19 @@ class EntityFields
     public function addRelation(string $key, array $relation): void
     {
         if (isset($this->relationData[$key])) {
-            throw new EntityException("A relation key '{$key}' is already defined");
+            throw EntityException::duplicateRelation($key);
         }
 
         if (empty($relation['entity']) or !is_string($relation['entity'])) {
-            throw new EntityException('A related entity alias is not specified for the "' . $key . '" relation.');
+            throw EntityException::missingRelationAlias($key);
         }
 
         if (empty($relation['type'])) {
-            throw new EntityException('A relation type is not specified for the "' . $key . '" relation.');
+            throw EntityException::missingRelationType($key);
         }
 
         if (!is_string($relation['type']) or !in_array($relation['type'], ['has-one', 'has-many', 'belongs-one', 'belongs-many', 'meta'])) {
-            throw new EntityException('Unsupported type for the "' . $key . '" relation. Supported values: meta, has-one, has-many, belongs-one, or belongs-many');
+            throw EntityException::unsupportedRelationType($key, (string) $relation['type']);
         }
 
         if (empty($relation['local_key']) or !is_string($relation['local_key'])) {
@@ -354,17 +357,17 @@ class EntityFields
         }
 
         if (isset($relation['constraint']['callback']) and $relation['constraint']['callback'] instanceof \Closure) {
-            throw new EntityException("The condition callback for relation '{$key}' cannot be a Closure. Please use a serializable callable (e.g., string or array).");
+            throw EntityException::closureCallback($key);
         }
 
         // Validate local_key exists in this entity's fields
         if (!isset($this->fields[$relation['local_key']])) {
-            throw new EntityException("Local key '{$relation['local_key']}' does not exist in the entity fields for relation '{$key}'");
+            throw EntityException::invalidLocalKey($key, $relation['local_key']);
         }
 
         // Validate belongs-one foreign_key exists in this entity's fields
         if ($relation['type'] === 'belongs-one' and !empty($relation['foreign_key']) and !isset($this->fields[$relation['foreign_key']])) {
-            throw new EntityException("Foreign key '{$relation['foreign_key']}' does not exist in the local entity fields for belongs-one relation '{$key}'");
+            throw EntityException::invalidForeignKey($key, $relation['foreign_key']);
         }
 
         $this->relationData[$key] = [
@@ -395,7 +398,7 @@ class EntityFields
         }
 
         if (!isset($this->relationData[$key])) {
-            throw new EntityException('Relation "' . $key . '" is not defined for an entity.');
+            throw EntityException::undefinedRelation($key);
         }
 
         $relation = $this->container->make(EntityRelation::class, [

@@ -33,9 +33,9 @@ trait ModelRelations
     {
         $this->withRelations = is_string($relations) ? func_get_args() : $relations;
 
-        foreach ($this->withRelations as $key => $relation) {
-            if (!isset($this->relations[$relation])) {
-                throw new EntityException('A relation "' . $key . '" is not defined for an entity');
+        foreach ($this->withRelations as $key) {
+            if (!isset($this->relations[$key])) {
+                throw EntityException::undefinedRelation($key);
             }
         }
 

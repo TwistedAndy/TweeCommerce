@@ -39,7 +39,7 @@ class EntityRegistry
     public function registerEntity(string $alias, array $config): void
     {
         if (empty($config['entity']) or !is_string($config['entity']) or !is_a($config['entity'], EntityInterface::class, true)) {
-            throw new EntityException('Specified entity class does not exist or does not implement EntityInterface.');
+            throw EntityException::invalidEntityClass(is_string($config['entity']) ? $config['entity'] : '');
         }
 
         $this->fields[$alias] = $config['entity']::initEntity($this->container);
@@ -51,11 +51,11 @@ class EntityRegistry
                 $config['model'] = EntityModel::class;
             }
         } elseif (!is_string($config['model']) or !is_a($config['model'], EntityModel::class, true)) {
-            throw new EntityException('Entity model should extend the ' . EntityModel::class . ' class.');
+            throw EntityException::invalidModelClass(is_string($config['model']) ? $config['model'] : '');
         }
 
         if (empty($config['table'])) {
-            throw new EntityException('Entity table is required for an ' . $alias . ' entity.');
+            throw EntityException::missingTable($alias);
         }
 
         $this->config[$alias] = $config;
@@ -142,15 +142,15 @@ class EntityRegistry
         $pivotConfig = $config['pivots'][$relatedAlias];
 
         if (empty($pivotConfig['table'])) {
-            throw new EntityException('A pivot table is not specified for the ' . $localAlias . ' to ' . $relatedAlias . ' relation.');
+            throw EntityException::missingPivotTable($localAlias, $relatedAlias);
         }
 
         if (empty($pivotConfig['local_column']) or !is_string($pivotConfig['local_column'])) {
-            throw new EntityException('A pivot foreign column is not specified for the ' . $localAlias . ' to ' . $relatedAlias . ' relation.');
+            throw EntityException::missingPivotColumn($localAlias, $relatedAlias, 'local');
         }
 
         if (empty($pivotConfig['foreign_column']) or !is_string($pivotConfig['foreign_column'])) {
-            throw new EntityException('A pivot foreign column is not specified for the ' . $localAlias . ' to ' . $relatedAlias . ' relation.');
+            throw EntityException::missingPivotColumn($localAlias, $relatedAlias, 'foreign');
         }
 
         return $config['pivots'][$relatedAlias];
@@ -171,7 +171,7 @@ class EntityRegistry
     public function getConfig(string $alias): array
     {
         if (empty($this->config[$alias])) {
-            throw new EntityException('Entity type not defined for the ' . $alias . ' entity.');
+            throw EntityException::unknownAlias($alias);
         }
 
         return $this->config[$alias];
