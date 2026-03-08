@@ -161,7 +161,12 @@ class EntityRegistry
      *
      * @param string $alias
      *
-     * @return array
+     * @return array{
+     *    entity:    class-string<EntityInterface>,
+     *    table:     string,
+     *    db_group?: string,
+     *    pivots?:   array<string, string>,
+     *  }
      */
     public function getConfig(string $alias): array
     {

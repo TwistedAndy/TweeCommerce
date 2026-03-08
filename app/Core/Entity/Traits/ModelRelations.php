@@ -61,15 +61,6 @@ trait ModelRelations
     }
 
     /**
-     * Set the relation fields
-     */
-    protected function setRelations(EntityFields $fields): void
-    {
-        $this->fields    = $fields;
-        $this->relations = $fields->getRelations();
-    }
-
-    /**
      * Get the relation fields
      *
      * @return array<string, EntityRelation>

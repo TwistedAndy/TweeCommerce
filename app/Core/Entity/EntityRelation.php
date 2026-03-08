@@ -3,6 +3,7 @@
 namespace App\Core\Entity;
 
 use CodeIgniter\Database\BaseBuilder;
+use CodeIgniter\Database\BaseConnection;
 
 class EntityRelation
 {
@@ -56,36 +57,27 @@ class EntityRelation
     }
 
     /**
-     * Get a configured Model Instance proxying the Builder for this relation.
-     *
-     * This method modifies the internal Query Builder state of the related model.
-     * It must be immediately followed by a terminal operation (findAll(), first()),
-     * which will null the builder after executing.
+     * Get the relation type
      */
-    public function query(EntityInterface $localEntity): EntityModel
+    public function getType(): string
     {
-        $builder = $this->relatedModel->builder();
-        $localId = $this->getLocalId($localEntity);
+        return $this->type;
+    }
 
-        match ($this->type) {
-            'meta' => $builder->where(
-                $this->relatedConfig['entity_column'] ?? 'entity_id',
-                $localId
-            ),
-            'has-one', 'has-many' => $builder->where($this->foreignKey, $localId),
-            'belongs-one' => $builder->where(
-                $this->relatedKey,
-                $this->getForeignId($localEntity)
-            ),
-            'belongs-many' => $this->buildBelongsManyQuery($localEntity, $localId),
-            default => throw new EntityException("Unknown relation type: {$this->type}")
-        };
+    /**
+     * Get related table name
+     */
+    public function getTable(): string
+    {
+        return $this->relatedTable;
+    }
 
-        if ($this->constraint) {
-            $this->applyConstraints($builder);
-        }
-
-        return $this->relatedModel;
+    /**
+     * Get related config array
+     */
+    public function getConfig(): array
+    {
+        return $this->relatedConfig;
     }
 
     public function get(EntityInterface $entity): EntityInterface|array|null
@@ -147,6 +139,86 @@ class EntityRelation
     public function resolve(int|string|array|EntityInterface|null $value): EntityInterface|array|null
     {
         return $this->isMultiple ? $this->resolveMany($value) : $this->resolveOne($value);
+    }
+
+    /**
+     * Apply the appropriate LEFT JOIN(s) for this relation to the given builder.
+     * This is the JOIN-time counterpart of query(), which builds WHERE clauses for lazy loading.
+     *
+     *   belongs-one  → JOIN related ON related.pk = local.fk
+     *   has-one/many → JOIN related ON related.fk = local.pk
+     *   belongs-many → JOIN pivot ON pivot.local = local.pk, JOIN related ON related.fk = pivot.foreign
+     *   meta         → aliased JOIN per key: JOIN related AS m_rel_key ON ... AND key_col = 'key'
+     */
+    public function join(BaseBuilder $builder, string $localTable, string $localAlias, BaseConnection $db, string $column = ''): void
+    {
+        switch ($this->type) {
+            case 'belongs-one':
+                $builder->join($this->relatedTable, "{$this->relatedTable}.{$this->relatedKey} = {$localTable}.{$this->foreignKey}", 'left');
+                break;
+
+            case 'has-one':
+            case 'has-many':
+                $builder->join($this->relatedTable, "{$this->relatedTable}.{$this->foreignKey} = {$localTable}.{$this->localKey}", 'left');
+                break;
+
+            case 'belongs-many':
+                $pivot = $this->registry->getPivotConfig($localAlias, $this->relatedAlias);
+                $fk    = $this->foreignKey ? : $this->relatedKey;
+
+                $builder
+                    ->join($pivot['table'], "{$pivot['table']}.{$pivot['local_column']} = {$localTable}.{$this->localKey}", 'left')
+                    ->join($this->relatedTable, "{$this->relatedTable}.{$fk} = {$pivot['table']}.{$pivot['foreign_column']}", 'left');
+                break;
+
+            case 'meta':
+                $entityColumn = $this->relatedConfig['entity_column'] ?? 'entity_id';
+                $keyColumn    = $this->relatedConfig['key_column'] ?? 'meta_key';
+                $alias        = "m_{$this->relationName}_{$column}";
+
+                $builder->join(
+                    "{$this->relatedTable} {$alias}",
+                    "{$alias}.{$entityColumn} = {$localTable}.{$this->localKey} AND {$alias}.{$keyColumn} = " . $db->escape($column),
+                    'left'
+                );
+                break;
+
+            default:
+                throw new EntityException("Relation type '{$this->type}' is not supported for query filtering.");
+        }
+    }
+
+    /**
+     * Get a configured Model Instance proxying the Builder for this relation.
+     *
+     * This method modifies the internal Query Builder state of the related model.
+     * It must be immediately followed by a terminal operation (findAll(), first()),
+     * which will null the builder after executing.
+     */
+    public function query(EntityInterface $localEntity): EntityModel
+    {
+        $builder = $this->relatedModel->builder();
+        $localId = $this->getLocalId($localEntity);
+
+        match ($this->type) {
+            'meta' => $builder->where(
+                $this->relatedConfig['entity_column'] ?? 'entity_id',
+                $localId
+            ),
+            'has-one', 'has-many' => $builder->where($this->foreignKey, $localId),
+            'belongs-one' => $builder->where(
+                $this->relatedKey,
+                $this->getForeignId($localEntity)
+            ),
+            'belongs-many' => $this->buildBelongsManyQuery($localEntity, $localId),
+            default => throw new EntityException("Unknown relation type: {$this->type}")
+        };
+
+        if ($this->constraint) {
+            $this->applyConstraints($builder);
+        }
+
+        return $this->relatedModel;
     }
 
     /**
@@ -793,7 +865,7 @@ class EntityRelation
 
         $builder = $this->relatedModel->builder($pivotTable);
 
-        // 1. If no foreign IDs are provided, this acts as a full detach
+        // If no foreign IDs are provided, this acts as a full detach
         if (empty($foreignIds)) {
             is_array($localId) ? $builder->whereIn($localColumn, $localId) : $builder->where($localColumn, $localId);
             $builder->delete();
@@ -801,7 +873,7 @@ class EntityRelation
             return;
         }
 
-        // 2. Fetch current pivot relationships
+        // Fetch current pivot relationships
         $currentRecords = $builder->select($foreignColumn)
             ->where($localColumn, $localId)
             ->get()->getResultArray();
@@ -810,11 +882,11 @@ class EntityRelation
 
         $currentIds = array_column($currentRecords, $foreignColumn);
 
-        // 3. Diff arrays to find what needs to be added or removed
+        // Diff arrays to find what needs to be added or removed
         $idsToDetach = array_diff($currentIds, $foreignIds);
         $idsToAttach = array_diff($foreignIds, $currentIds);
 
-        // 4. Detach old IDs
+        // Detach old IDs
         if (!empty($idsToDetach)) {
             $this->relatedModel->builder($pivotTable)
                 ->where($localColumn, $localId)
@@ -823,7 +895,7 @@ class EntityRelation
             $this->relatedModel->reset();
         }
 
-        // 5. Attach new IDs
+        // Attach new IDs
         if (!empty($idsToAttach)) {
             $insertData = [];
             foreach ($idsToAttach as $id) {

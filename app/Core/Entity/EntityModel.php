@@ -4,6 +4,7 @@ namespace App\Core\Entity;
 
 use App\Core\Entity\Traits\ModelCache;
 use App\Core\Entity\Traits\ModelRelations;
+use App\Core\Entity\Traits\QueryBuilder;
 
 use CodeIgniter\Database\BaseBuilder;
 use CodeIgniter\Database\BaseConnection;
@@ -19,6 +20,7 @@ class EntityModel
 {
     use ModelCache;
     use ModelRelations;
+    use QueryBuilder;
 
     public readonly PagerInterface $pager;
 
@@ -30,6 +32,7 @@ class EntityModel
     protected string         $primaryKey;
     protected string         $class;
     protected string         $alias;
+    protected EntityFields   $fields;
     protected EntityRegistry $registry;
 
     protected string $dateFormat   = 'U';
@@ -43,6 +46,7 @@ class EntityModel
 
     protected ValidationInterface $validator;
 
+    protected array $relations        = [];
     protected array $allowedFields    = [];
     protected array $validationRules  = [];
     protected array $validationErrors = [];
@@ -59,6 +63,7 @@ class EntityModel
         $this->alias    = $alias;
         $this->class    = $registry->getEntityClass($alias);
         $this->registry = $registry;
+        $this->fields   = $fields;
         $this->pager    = $pager;
 
         $this->DBGroup = $registry->getDatabaseGroup($alias);
@@ -73,56 +78,23 @@ class EntityModel
         $this->updatedField = $fields->getUpdatedKey();
         $this->deletedField = $fields->getDeletedKey();
 
-        $allowedFields   = [];
-        $validationRules = [];
+        $allowedFields = [];
 
         $primaryKey = $fields->getPrimaryKey();
         $relations  = $fields->getRelations();
 
         foreach ($fields->getFields() as $key => $field) {
-
-            if ($key != $primaryKey and !isset($relations[$key])) {
+            if ($key !== $primaryKey and !isset($relations[$key])) {
                 $allowedFields[$key] = true;
             }
-
-            if (empty($field['rules']) or !is_array($field['rules']) or empty($field['rules']['rules'])) {
-                continue;
-            }
-
-            $rule = [];
-
-            if (!empty($field['label'])) {
-                $rule['label'] = $field['label'];
-            }
-
-            $rules = $field['rules']['rules'];
-
-            if (is_string($rules)) {
-                $rules = str_replace('{table}', $this->table, $rules);
-            } elseif (is_array($rules)) {
-                foreach ($rules as $index => $rule) {
-                    $rules[$index] = str_replace('{table}', $this->table, $rule);
-                }
-            }
-
-            $rule['rules'] = $rules;
-
-            if (!empty($field['rules']['errors'])) {
-                $rule['errors'] = $field['rules']['errors'];
-            }
-
-            $validationRules[$key] = $rule;
         }
 
         $this->useTimestamps  = ($this->createdField or $this->updatedField);
         $this->useSoftDeletes = (bool) $this->deletedField;
 
         $this->allowedFields   = $allowedFields;
-        $this->validationRules = $validationRules;
-
-        $this->setRelations($fields);
-
-        $this->initCache($this->alias);
+        $this->validationRules = $fields->getRules($this->table);
+        $this->relations       = $fields->getRelations();
 
         if ($this->createdField) {
             $dateFormat = $fields->getDateFormat($this->createdField);
@@ -137,6 +109,8 @@ class EntityModel
                 $this->dateFormat = $dateFormat;
             }
         }
+
+        $this->initCache($this->alias);
 
     }
 
@@ -538,8 +512,9 @@ class EntityModel
     public function reset(): self
     {
         $this->builder->resetQuery();
-        $this->excludeDeleted = true;
-        $this->resetWith();
+        $this->excludeDeleted  = true;
+        $this->joinedRelations = [];
+        $this->withRelations   = [];
 
         return $this;
     }

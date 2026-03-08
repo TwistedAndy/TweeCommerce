@@ -29,6 +29,8 @@ class EntityFields
     protected array $casts        = [];
     protected array $castParams   = [];
     protected array $castHandlers = [];
+    protected array $tableRules   = [];
+    protected array $rules        = [];
 
     protected array $dateFormats = [];
 
@@ -60,7 +62,7 @@ class EntityFields
      *   default?:  mixed,
      *   type?:     string,
      *   rules?:    string|array{
-     *     rules: string|array<string, string>,
+     *     rules:   string|array<string, string>,
      *     errors?: array<string, string>
      *   },
      *   relation?: array{
@@ -203,11 +205,7 @@ class EntityFields
         }
 
         if (!empty($field['rules'])) {
-            if (is_string($field['rules'])) {
-                $field['rules'] = [
-                    'rules' => $field['rules'],
-                ];
-            } elseif (is_array($field['rules']) and empty($field['rules']['rules'])) {
+            if (is_string($field['rules']) or (is_array($field['rules']) and empty($field['rules']['rules']))) {
                 $field['rules'] = [
                     'rules' => $field['rules'],
                 ];
@@ -219,8 +217,42 @@ class EntityFields
 
             if (!empty($field['errors']) and is_array($field['errors'])) {
                 $field['rules']['errors'] = $field['errors'];
-                unset($field['errors']);
             }
+
+            $rule = [];
+
+            if (!empty($field['label'])) {
+                $rule['label'] = $field['label'];
+            }
+
+            $rules = $field['rules']['rules'];
+
+            $hasTable = false;
+
+            if (is_string($rules)) {
+                $hasTable = str_contains($rules, '{table}');
+            } elseif (is_array($rules)) {
+                foreach ($rules as $rule) {
+                    $hasTable = str_contains($rule, '{table}');
+                    if ($hasTable) {
+                        break;
+                    }
+                }
+            }
+
+            if ($hasTable) {
+                $this->tableRules[$key] = true;
+            }
+
+            $rule['rules'] = $rules;
+
+            if (!empty($field['rules']['errors'])) {
+                $rule['errors'] = $field['rules']['errors'];
+            }
+
+            unset($field['rules'], $field['errors']);
+
+            $this->rules[$key] = $rule;
         }
 
         if (array_key_exists('default', $field)) {
@@ -240,6 +272,40 @@ class EntityFields
     public function getFields(): array
     {
         return $this->fields;
+    }
+
+    /**
+     * Get the validation rules with table name processing
+     *
+     * @return array<string, array{
+     *   label?:  string,
+     *   rules:   string|array<string, string>,
+     *   errors?: array<string, string>
+     * }
+     */
+    public function getRules(string $table = ''): array
+    {
+        if (empty($this->tableRules) or $table === '') {
+            return $this->rules;
+        } else {
+            $result = $this->rules;
+
+            foreach ($this->tableRules as $key => $flag) {
+                $rules = $this->rules[$key]['rules'];
+
+                if (is_string($rules)) {
+                    $rules = str_replace('{table}', $table, $rules);
+                } elseif (is_array($rules)) {
+                    foreach ($rules as $index => $rule) {
+                        $rules[$index] = str_replace('{table}', $table, $rule);
+                    }
+                }
+
+                $result[$key]['rules'] = $rules;
+            }
+
+            return $result;
+        }
     }
 
     /**
