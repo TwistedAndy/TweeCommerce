@@ -84,4 +84,20 @@ trait ModelCache
         }
     }
 
+    /**
+     * Remove all cached entities where a field matches a value, optionally
+     * keeping entries whose primary key is in $excludeIds.
+     * Used by detachOrphans() to avoid a SELECT query for cache invalidation.
+     */
+    public function removeFromCacheWhere(string $field, mixed $value, array $excludeIds = []): void
+    {
+        $excludeSet = array_flip($excludeIds);
+
+        foreach (static::$identityMap[$this->alias] as $id => $entity) {
+            if ($entity->getAttribute($field) == $value and !isset($excludeSet[$id])) {
+                unset(static::$identityMap[$this->alias][$id]);
+            }
+        }
+    }
+
 }

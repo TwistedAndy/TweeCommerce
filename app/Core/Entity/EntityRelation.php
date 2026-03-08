@@ -415,34 +415,26 @@ class EntityRelation
 
         $this->relatedModel->reset();
 
-        $relatedEntities = [];
+        // Build a hash map keyed by the matching field so each parent gets O(1) lookup
+        $relatedByKey = [];
         foreach ($relatedRecords as $row) {
-            $relatedEntities[] = $this->relatedModel->hydrateRow($row);
+            $key = (string) $row[$keyToMatch];
+
+            if (!isset($relatedByKey[$key])) {
+                $relatedByKey[$key] = [];
+            }
+
+            $relatedByKey[$key][] = $this->relatedModel->hydrateRow($row);
         }
 
         foreach ($entities as $parentEntity) {
-            $parentId = $this->type === 'belongs-one' ? $this->getForeignId($parentEntity) : $this->getLocalId($parentEntity);
+            $parentId = (string) ($this->type === 'belongs-one' ? $this->getForeignId($parentEntity) : $this->getLocalId($parentEntity));
 
             if (empty($parentId)) {
                 continue;
             }
 
-            $matched = [];
-
-            if ($this->type === 'belongs-one') {
-                foreach ($relatedEntities as $relatedEntity) {
-                    if ($relatedEntity->getAttribute($this->relatedKey) == $parentId) {
-                        $matched[] = $relatedEntity;
-                    }
-                }
-            } else {
-                foreach ($relatedEntities as $relatedEntity) {
-                    if ($relatedEntity->getAttribute($this->foreignKey) == $parentId) {
-                        $matched[] = $relatedEntity;
-                    }
-                }
-            }
-
+            $matched = $relatedByKey[$parentId] ?? [];
             $parentEntity->setAttribute($this->relationName, $this->isMultiple ? $matched : ($matched[0] ?? null));
             $parentEntity->flushChanges();
         }
@@ -532,11 +524,13 @@ class EntityRelation
             throw EntityException::parentNotSaved($this->relationName);
         }
 
-        // Fetch existing meta object or create a blank one
+        // Use the already-loaded meta object, or fetch it from cache/DB so that
+        // MetaModel::save() has the correct $original state for INSERT vs UPDATE decisions.
         $meta = $localEntity->getAttribute($this->relationName);
 
         if (!$meta instanceof EntityInterface) {
-            $meta = new $this->relatedClass([], $this->relatedAlias);
+            $meta = $this->relatedModel->find($localId)
+                ?? new $this->relatedClass([$this->relatedKey => $localId], $this->relatedAlias, $this->relatedFields);
             $localEntity->setAttribute($this->relationName, $meta);
         }
 
@@ -828,29 +822,17 @@ class EntityRelation
      */
     protected function detachOrphans(string $foreignKey, int|string $localId, array $excludeIds = []): void
     {
-        $builder = $this->relatedModel->builder()->select($this->relatedKey)->where($foreignKey, $localId);
+        $builder = $this->relatedModel->builder()->where($foreignKey, $localId);
 
         if (!empty($excludeIds)) {
             $builder->whereNotIn($this->relatedKey, array_unique($excludeIds));
         }
 
-        $orphans = $builder->get()->getResultArray();
+        $builder->update([$foreignKey => null]);
         $this->relatedModel->reset();
 
-        if (empty($orphans)) {
-            return;
-        }
-
-        $orphanIds = array_column($orphans, $this->relatedKey);
-
-        $this->relatedModel->builder()
-            ->whereIn($this->relatedKey, $orphanIds)
-            ->update([$foreignKey => null]);
-
-        $this->relatedModel->reset();
-
-        // Purge the modified orphans from the Identity Map!
-        $this->relatedModel->removeFromCache($orphanIds);
+        // Purge matching orphans from the identity map without an extra SELECT
+        $this->relatedModel->removeFromCacheWhere($foreignKey, $localId, $excludeIds);
     }
 
     /**

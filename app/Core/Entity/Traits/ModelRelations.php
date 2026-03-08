@@ -101,7 +101,7 @@ trait ModelRelations
                 $hasDeepChanges = $value->hasChanged();
             } elseif (is_array($value)) {
                 foreach ($value as $item) {
-                    if ($item instanceof EntityInterface && $item->hasChanged()) {
+                    if ($item instanceof EntityInterface and $item->hasChanged()) {
                         $hasDeepChanges = true;
                         break;
                     }

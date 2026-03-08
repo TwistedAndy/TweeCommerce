@@ -88,13 +88,7 @@ trait QueryBuilder
      */
     public function addSelect(string|array ...$columns): static
     {
-        $flat = [];
-
-        foreach ($columns as $col) {
-            is_array($col) ? array_push($flat, ...$col) : ($flat[] = $col);
-        }
-
-        $this->builder->select(implode(', ', $flat));
+        $this->builder->select(implode(', ', $this->flattenArgs($columns)));
 
         return $this;
     }
@@ -1096,17 +1090,7 @@ trait QueryBuilder
      */
     public function groupBy(string|array ...$groups): static
     {
-        $flat = [];
-
-        foreach ($groups as $g) {
-            if (is_array($g)) {
-                array_push($flat, ...$g);
-            } else {
-                $flat[] = $g;
-            }
-        }
-
-        $this->builder->groupBy(implode(', ', $flat));
+        $this->builder->groupBy(implode(', ', $this->flattenArgs($groups)));
 
         return $this;
     }
@@ -1197,7 +1181,9 @@ trait QueryBuilder
      */
     public function take(int $value): static
     {
-        return $this->limit($value);
+        $this->builder->limit($value);
+
+        return $this;
     }
 
     /**
@@ -1217,7 +1203,9 @@ trait QueryBuilder
      */
     public function skip(int $value): static
     {
-        return $this->offset($value);
+        $this->builder->offset($value);
+
+        return $this;
     }
 
     /**
@@ -1400,7 +1388,7 @@ trait QueryBuilder
         }
 
         // Normalize 2-arg shorthand: where('col', 'val') => operator = null, value = 'val'
-        if ($value === null && $operator !== null && (!is_string($operator) || !isset($this->operators[strtolower($operator)]))) {
+        if ($value === null and $operator !== null and (!is_string($operator) or !isset($this->operators[strtolower($operator)]))) {
             $value    = $operator;
             $operator = null;
         }
@@ -1545,6 +1533,21 @@ trait QueryBuilder
         }
 
         return $value;
+    }
+
+    /**
+     * Flatten a variadic array of strings and string-arrays into a single flat array.
+     * Used by addSelect() and groupBy() to normalise their mixed argument forms.
+     */
+    protected function flattenArgs(array $args): array
+    {
+        $flat = [];
+
+        foreach ($args as $arg) {
+            is_array($arg) ? array_push($flat, ...$arg) : ($flat[] = $arg);
+        }
+
+        return $flat;
     }
 
     /**
