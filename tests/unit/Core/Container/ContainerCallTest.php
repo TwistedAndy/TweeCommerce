@@ -19,15 +19,6 @@ class ContainerCallTest extends CIUnitTestCase
     }
 
     /**
-     * Tests calling a method using the "Class@method" string syntax.
-     */
-    public function testCallWithAtSignSyntax(): void
-    {
-        $result = $this->container->call(CallStub::class . '@work');
-        $this->assertEquals('worked', $result);
-    }
-
-    /**
      * Tests calling a global PHP function via string.
      */
     public function testCallExecutesGlobalFunction(): void
@@ -123,8 +114,8 @@ class ContainerCallTest extends CIUnitTestCase
         $this->expectException(ContainerException::class);
         $this->expectExceptionMessage('Invalid callback arguments');
 
-        // Missing method name index 1
-        $this->container->call(['SomeClass']);
+        // null first element is falsy, so !empty($callback[0]) is false → falls to getCallbackKey → throws
+        $this->container->call([null, 'someMethod']);
     }
 
     /**
@@ -353,21 +344,22 @@ class ContainerCallTest extends CIUnitTestCase
         $this->expectExceptionMessage('Failed to reflect on callback');
 
         // We spoof the cache to bypass the initial reflection check in call()
-        // This simulates a scenario where the cache exists but the method is gone/invalid
-        $callback = CallStub::class . '@missingMethod';
+        // This simulates a scenario where the cache exists but is_static was never stored
+        // (e.g. injected externally or from a stale cache format)
+        $callback = CallStub::class . '::missingMethod';
 
         $reflection = new \ReflectionClass($this->container);
         $prop       = $reflection->getProperty('functionCache');
-        // Inject dummy dependencies so the cache hit logic works
+        // Inject a functionCache entry without a matching staticCache entry to trigger the stale-cache re-reflection path
         $cache            = $prop->getValue($this->container);
         $cache[$callback] = [];
         $prop->setValue($this->container, $cache);
 
         // This triggers the path:
-        // 1. Cache hit ($reflector remains null)
-        // 2. $parsedClass populated from string
-        // 3. if (!$reflector) -> tries new ReflectionMethod(CallStub, 'missingMethod')
-        // 4. Throws ReflectionException -> caught and wrapped in ContainerException
+        // 1. functionCache hit, but staticCache has no entry for this key
+        // 2. $parsedClass populated from '::' parsing
+        // 3. Fallback: new ReflectionMethod(CallStub, 'missingMethod') → ReflectionException
+        // 4. Wrapped in ContainerException
         $this->container->call($callback);
     }
 }

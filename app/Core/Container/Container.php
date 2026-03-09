@@ -58,6 +58,11 @@ class Container implements ContainerInterface
     protected array $contextual = [];
 
     /**
+     * Cache of isStatic flags for method callbacks
+     */
+    protected array $staticCache = [];
+
+    /**
      * Cache of function/method parameters to avoid slow Reflection
      * Keys are unique identifiers for the callback (e.g. "Class::method" or Closure hash).
      */
@@ -224,7 +229,11 @@ class Container implements ContainerInterface
 
         // Check Class Existence (Autowiring)
         if (class_exists($id)) {
-            return (new ReflectionClass($id))->isInstantiable();
+            if ((new ReflectionClass($id))->isInstantiable()) {
+                $this->resolutionCache[$id] = $id;
+                return true;
+            }
+            return false;
         }
 
         // Check Core Service Fallback
@@ -250,15 +259,23 @@ class Container implements ContainerInterface
      */
     public function make(string $abstract, array $parameters = [], string $context = '')
     {
-        if (isset($this->instances[$abstract]) and empty($parameters) and ($context === '' or !isset($this->contextual[$context][$abstract]))) {
+        // Normalize context: if it has no override for this abstract, resolution is
+        // identical to the no-context path - allow the resolution cache to be used.
+        if ($context !== '' and !isset($this->contextual[$context][$abstract])) {
+            $context = '';
+        }
+
+        $isEmptyContext = $context === '';
+
+        if (isset($this->instances[$abstract]) and $isEmptyContext and $parameters === []) {
             return $this->instances[$abstract];
         }
 
-        if ($context === '' and isset($this->resolutionCache[$abstract])) {
+        if ($isEmptyContext and isset($this->resolutionCache[$abstract])) {
             $concrete = $this->resolutionCache[$abstract];
         } else {
             $concrete = $this->resolveConcrete($abstract, $context);
-            if ($context === '' and is_string($concrete) and empty($parameters)) {
+            if ($isEmptyContext and is_string($concrete) and $parameters === []) {
                 $this->resolutionCache[$abstract] = $concrete;
             }
         }
@@ -267,7 +284,7 @@ class Container implements ContainerInterface
 
         // Concrete Instance Check (e.g. Interface -> Alias -> Existing Singleton)
         if ($isStringConcrete and isset($this->instances[$concrete])) {
-            if ($context === '' and $abstract !== $concrete) {
+            if ($isEmptyContext and $abstract !== $concrete) {
                 $this->instances[$abstract] = $this->instances[$concrete];
             }
             return $this->instances[$concrete];
@@ -309,7 +326,7 @@ class Container implements ContainerInterface
                 }
             }
 
-            if ($context === '') {
+            if ($isEmptyContext) {
                 $this->instances[$abstract] = $object;
                 if ($isScoped) {
                     $this->scopedInstances[$abstract] = true;
@@ -340,19 +357,45 @@ class Container implements ContainerInterface
      * Call the given callback/method and inject its dependencies
      * Matches Laravel's: $container->call([$object, 'method'], ['param' => 123]);
      *
-     * @param callable|string|array $callback Callback
-     * @param array $parameters               Named parameters to override
-     * @param string|null $defaultMethod      Method to call if $callback is just a class name
+     * @param callable|string|array|object $callback Callback
+     * @param array $parameters                      Named parameters to override
+     * @param string|null $defaultMethod             Method to call if $callback is just a class name
      *
      * @return mixed
      */
-    public function call(callable|string|array $callback, array $parameters = [], ?string $defaultMethod = null): mixed
+    public function call(callable|string|array|object $callback, array $parameters = [], ?string $defaultMethod = null): mixed
     {
+        $isStatic     = false;
         $parsedClass  = null;
         $parsedMethod = null;
-        $reflector    = null;
+        $parsedObject = false;
 
-        if (is_string($callback)) {
+        if (is_object($callback) and !$callback instanceof Closure) {
+            $parsedObject = $callback;
+            $parsedClass  = $parsedObject::class;
+            $parsedMethod = $defaultMethod ?? '__invoke';
+
+            $callback    = [$parsedObject, $parsedMethod];
+            $callbackKey = $parsedClass . '::' . $parsedMethod;
+        } elseif (is_array($callback) and !empty($callback[0])) {
+            if (empty($callback[1])) {
+                $parsedMethod = $defaultMethod ?? '__invoke';
+            } else {
+                $parsedMethod = $callback[1];
+            }
+
+            if (is_object($callback[0])) {
+                $parsedObject = $callback[0];
+                $parsedClass  = $parsedObject::class;
+
+                $callback = [$parsedObject, $parsedMethod];
+            } else {
+                $parsedClass = $callback[0];
+                $callback    = [$parsedClass, $parsedMethod];
+            }
+
+            $callbackKey = $parsedClass . '::' . $parsedMethod;
+        } elseif (is_string($callback)) {
             $callbackKey = $callback;
 
             if (!function_exists($callback)) {
@@ -363,20 +406,6 @@ class Container implements ContainerInterface
                     $parsedMethod = $defaultMethod ?? '__invoke';
                 }
             }
-        } elseif (is_array($callback) and !empty($callback[0])) {
-            if (empty($callback[1])) {
-                $parsedMethod = $defaultMethod ?? '__invoke';
-            } else {
-                $parsedMethod = $callback[1];
-            }
-
-            if (is_object($callback[0])) {
-                $parsedClass = $callback[0]::class;
-            } else {
-                $parsedClass = $callback[0];
-            }
-
-            $callbackKey = $parsedClass . '::' . $parsedMethod;
         } else {
             $callbackKey = $this->getCallbackKey($callback);
         }
@@ -389,18 +418,21 @@ class Container implements ContainerInterface
             try {
                 if ($parsedClass) {
                     $reflector   = new ReflectionMethod($parsedClass, $parsedMethod);
+                    $isStatic    = $reflector->isStatic();
                     $contextName = $callbackKey ? : ($parsedClass . '::' . $parsedMethod);
                 } elseif (is_string($callback) and function_exists($callback)) {
                     $reflector   = new ReflectionFunction($callback);
                     $contextName = $callback;
                 } elseif (is_array($callback)) {
                     $reflector   = new ReflectionMethod($callback[0], $callback[1]);
+                    $isStatic    = $reflector->isStatic();
                     $contextName = $callbackKey;
                 } elseif ($callback instanceof Closure) {
                     $reflector   = new ReflectionFunction($callback);
                     $contextName = 'Closure';
                 } elseif (is_object($callback)) {
                     $reflector   = new ReflectionMethod($callback, '__invoke');
+                    $isStatic    = $reflector->isStatic();
                     $contextName = $callbackKey;
                 } else {
                     throw new ContainerException('Invalid callback provided to call(): ' . serialize($callback));
@@ -412,30 +444,40 @@ class Container implements ContainerInterface
             $dependencies = $this->getReflectorParameters($reflector);
 
             if ($callbackKey) {
+                if ($reflector instanceof ReflectionMethod) {
+                    $this->staticCache[$callbackKey] = $isStatic;
+                }
                 $this->functionCache[$callbackKey] = $dependencies;
             }
         }
 
-        $dependencies = $this->resolveDependencies($contextName, $dependencies, $parameters);
+        if ($parsedClass !== null and !isset($this->contextual[$contextName]) and isset($this->contextual[$parsedClass])) {
+            $className = $parsedClass;
+        } else {
+            $className = $contextName;
+        }
 
-        if ($parsedClass) {
+        $args = $this->resolveDependencies($className, $dependencies, $parameters);
 
-            if (!$reflector) {
+        if ($parsedObject === false and $parsedClass) {
+            if (isset($this->staticCache[$callbackKey])) {
+                $isStatic = $this->staticCache[$callbackKey];
+            } else {
                 try {
-                    $reflector = new ReflectionMethod($parsedClass, $parsedMethod);
+                    $isStatic = (new ReflectionMethod($parsedClass, $parsedMethod))->isStatic();
                 } catch (ReflectionException $e) {
                     throw new ContainerException('Failed to reflect on callback: ' . $e->getMessage());
                 }
             }
 
-            $callback = $reflector->isStatic() ? [$parsedClass, $parsedMethod] : [$this->make($parsedClass), $parsedMethod];
+            $callback = $isStatic ? [$parsedClass, $parsedMethod] : [$this->make($parsedClass), $parsedMethod];
         }
 
         if (is_array($callback)) {
-            return call_user_func_array($callback, $dependencies);
+            return call_user_func_array($callback, $args);
         }
 
-        return $callback(...$dependencies);
+        return $callback(...$args);
     }
 
     /**
@@ -454,14 +496,15 @@ class Container implements ContainerInterface
         if (isset($this->instances[$abstract]) and is_object($this->instances[$abstract])) {
             $old = $this->instances[$abstract];
             if (isset($this->instances[$old::class]) and $this->instances[$old::class] === $old) {
-                unset($this->instances[$old::class]);
+                unset(
+                    $this->instances[$old::class],
+                    $this->scopedInstances[$old::class]
+                );
             }
         }
 
-        // Clear stale cache
-        unset($this->scopedInstances[$abstract]);
-
-        $this->resolutionCache = [];
+        // Clear stale cache for this specific abstract only — other entries are unrelated
+        unset($this->scopedInstances[$abstract], $this->resolutionCache[$abstract]);
 
         $this->instances[$abstract] = $instance;
 
@@ -556,10 +599,20 @@ class Container implements ContainerInterface
      */
     public function bind(string $abstract, string|callable|null $concrete = null, bool $shared = false): void
     {
-        // Clear stale cache
+        // Clear stale cache - also evict the old concrete's cached instance if present
+        if (isset($this->instances[$abstract]) and is_object($this->instances[$abstract])) {
+            $oldClass = $this->instances[$abstract]::class;
+            unset(
+                $this->instances[$oldClass],
+                $this->scopedInstances[$oldClass]
+            );
+        }
+
         unset(
             $this->instances[$abstract],
-            $this->scopedInstances[$abstract]
+            $this->singletons[$abstract],
+            $this->scopedInstances[$abstract],
+            $this->scopedDefinitions[$abstract]
         );
 
         $this->resolutionCache = [];
@@ -714,10 +767,17 @@ class Container implements ContainerInterface
         if (isset($this->instances[$abstract])) {
 
             if (is_object($this->instances[$abstract])) {
-                unset($this->instances[$this->instances[$abstract]::class]);
+                $oldClass = $this->instances[$abstract]::class;
+                unset(
+                    $this->instances[$oldClass],
+                    $this->scopedInstances[$oldClass]
+                );
             }
 
-            unset($this->instances[$abstract]);
+            unset(
+                $this->instances[$abstract],
+                $this->scopedInstances[$abstract]
+            );
         }
 
         // Clear the concrete singleton
@@ -807,6 +867,7 @@ class Container implements ContainerInterface
         $this->scopedInstances   = [];
         $this->scopedDefinitions = [];
 
+        $this->staticCache     = [];
         $this->functionCache   = [];
         $this->parameterCache  = [];
         $this->resolutionCache = [];
@@ -823,7 +884,22 @@ class Container implements ContainerInterface
      */
     public function forgetInstance(string $abstract): void
     {
-        unset($this->instances[$abstract]);
+        if (isset($this->instances[$abstract])) {
+            $instance = $this->instances[$abstract];
+
+            if (is_object($instance)) {
+                unset(
+                    $this->instances[$instance::class],
+                    $this->scopedInstances[$instance::class]
+                );
+            }
+
+            unset(
+                $this->instances[$abstract],
+                $this->scopedInstances[$abstract],
+                $this->resolutionCache[$abstract]
+            );
+        }
     }
 
     /**
@@ -834,6 +910,8 @@ class Container implements ContainerInterface
     public function forgetInstances(): void
     {
         $this->instances = [static::class => $this];
+
+        $this->scopedInstances = [];
     }
 
     /**
@@ -853,7 +931,6 @@ class Container implements ContainerInterface
 
         // Reset the tracker
         $this->scopedInstances = [];
-        $this->resolutionCache = [];
     }
 
     /**
@@ -891,11 +968,7 @@ class Container implements ContainerInterface
                 return null;
             }
 
-            if (defined('ROOTPATH')) {
-                $file = str_replace(ROOTPATH, '', $file);
-            }
-
-            return 'closure_' . $file . ':' . $reflector->getStartLine();
+            return 'closure_' . crc32($file) . ':' . $reflector->getStartLine();
         }
 
         if (is_string($callback)) {
@@ -920,15 +993,17 @@ class Container implements ContainerInterface
      */
     public function getConcreteClass(string $abstract, array $parameters = [], string $context = ''): string
     {
+        $isEmptyContext = $context === '';
+
         // Check the class resolution cache first
-        if ($context === '' and isset($this->resolutionCache[$abstract])) {
+        if ($isEmptyContext and isset($this->resolutionCache[$abstract])) {
             return $this->resolutionCache[$abstract];
         }
 
-        $isCacheable = ($context === '' and empty($parameters));
+        $isCacheable = ($isEmptyContext and $parameters === []);
 
         // If we have an object, we definitely know the class
-        if (isset($this->instances[$abstract]) and ($context === '' or !isset($this->contextual[$context][$abstract]))) {
+        if (isset($this->instances[$abstract]) and ($isEmptyContext or !isset($this->contextual[$context][$abstract]))) {
             $class = $this->instances[$abstract]::class;
 
             if ($isCacheable) {
@@ -1040,18 +1115,7 @@ class Container implements ContainerInterface
         $results      = [];
         $numericIndex = 0; // Cursor for positional arguments (0, 1, 2...)
 
-        $contextKey = $className;
-
-        if (!isset($this->contextual[$className]) and str_contains($className, '::')) {
-            $parts = explode('::', $className, 2);
-
-            if (isset($this->contextual[$parts[0]])) {
-                $contextKey = $parts[0];
-            }
-        }
-
         foreach ($dependencies as $dep) {
-
             $name = $dep['name'];
             $type = $dep['type_name'];
 
@@ -1093,7 +1157,7 @@ class Container implements ContainerInterface
 
                     // Resolution
                     try {
-                        $results[] = $this->make($type, [], $contextKey);
+                        $results[] = $this->make($type, [], $className);
                     } catch (Throwable $e) {
                         if ($dep['nullable']) {
                             $results[] = null;
@@ -1133,7 +1197,7 @@ class Container implements ContainerInterface
                     if (!$resolved) {
                         foreach ($type as $candidate) {
                             try {
-                                $results[] = $this->make($candidate, [], $contextKey);
+                                $results[] = $this->make($candidate, [], $className);
                                 $resolved  = true;
                                 break;
                             } catch (Throwable $e) {

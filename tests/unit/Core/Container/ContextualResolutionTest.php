@@ -239,22 +239,6 @@ class ContextualResolutionTest extends CIUnitTestCase
     }
 
     /**
-     * Tests contextual resolution when using the Class@Method string syntax in call().
-     */
-    public function testCallAtSyntaxContextual(): void
-    {
-        $this->container->bind(IContextWorker::class, ContextWorkerA::class);
-
-        $callString = ContextWorkerA::class . '@handle';
-
-        // Bind using the exact string that will be passed to call()
-        $this->container->bindWhen($callString, IContextWorker::class, ContextWorkerB::class);
-
-        $result = $this->container->call($callString);
-        $this->assertInstanceOf(ContextWorkerB::class, $result);
-    }
-
-    /**
      * Tests context injection for static method calls via call().
      */
     public function testContextualBindingForStaticMethodCalls(): void
@@ -268,28 +252,6 @@ class ContextualResolutionTest extends CIUnitTestCase
         );
 
         $result = $this->container->call([ContextWorkerA::class, 'staticHandle']);
-
-        $this->assertInstanceOf(ContextWorkerB::class, $result);
-    }
-
-    /**
-     * Tests that contextual binding works when the caller is defined via "Class@method" syntax,
-     * but the binding is defined on the Class.
-     * Covers: elseif (str_contains($className, '@')) { ... }
-     */
-    public function testContextualBindingWithAtSignSyntaxOnClass(): void
-    {
-        // 1. Bind Global Default: IContextWorker -> ContextWorkerA
-        $this->container->bind(IContextWorker::class, ContextWorkerA::class);
-
-        // 2. Bind Context: When 'ContextWorkerA' (the class) needs 'IContextWorker', give 'ContextWorkerB'
-        // We bind to the CLASS, not the method string.
-        $this->container->bindWhen(ContextWorkerA::class, IContextWorker::class, ContextWorkerB::class);
-
-        // 3. Call using string syntax "Class@handle"
-        // The container sees "ContextWorkerA@handle" is not bound directly in context,
-        // so it splits on '@', extracts "ContextWorkerA", and finds the binding.
-        $result = $this->container->call(ContextWorkerA::class . '@handle');
 
         $this->assertInstanceOf(ContextWorkerB::class, $result);
     }
