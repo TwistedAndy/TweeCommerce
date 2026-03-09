@@ -367,7 +367,7 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
 
         $this->attributes[$key] = $value;
 
-        return $this->fields->getDefaultValue($key);
+        return $value;
     }
 
     /**

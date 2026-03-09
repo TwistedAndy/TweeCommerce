@@ -253,7 +253,16 @@ class EntityModel
             return false;
         }
 
-        $useTransaction = (bool) $this->getRelations();
+        $entityAttrs    = $entity->getAttributes();
+        $entityChanges  = $entity->getChanges();
+        $useTransaction = false;
+
+        foreach (array_keys($this->relations) as $key) {
+            if (array_key_exists($key, $entityChanges) or !empty($entityAttrs[$key])) {
+                $useTransaction = true;
+                break;
+            }
+        }
 
         if ($useTransaction) {
             $this->db->transBegin();
@@ -324,7 +333,16 @@ class EntityModel
             return false;
         }
 
-        $useTransaction = (bool) $this->getRelations();
+        $entityAttrs    = $entity->getAttributes();
+        $entityChanges  = $entity->getChanges();
+        $useTransaction = false;
+
+        foreach (array_keys($this->relations) as $key) {
+            if (array_key_exists($key, $entityChanges) or !empty($entityAttrs[$key])) {
+                $useTransaction = true;
+                break;
+            }
+        }
 
         if ($useTransaction) {
             $this->db->transBegin();
@@ -390,7 +408,7 @@ class EntityModel
             return true;
         }
 
-        $useTransaction = $this->getRelations();
+        $useTransaction = (bool) $this->getRelations();
 
         if ($useTransaction) {
             $this->db->transBegin();
@@ -446,7 +464,7 @@ class EntityModel
             return true;
         }
 
-        $useTransaction = $this->getRelations();
+        $useTransaction = (bool) $this->getRelations();
 
         if ($useTransaction) {
             $this->db->transBegin();
@@ -581,7 +599,7 @@ class EntityModel
             // For updates, we only care about rules for fields present in the input
             $input = $data instanceof EntityInterface ? $data->getChanges() : $data;
 
-            foreach ($input as $key => $value) {
+            foreach (array_keys($rules) as $key) {
                 if (!array_key_exists($key, $input)) {
                     unset($rules[$key]);
                 }
