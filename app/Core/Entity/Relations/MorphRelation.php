@@ -131,6 +131,45 @@ class MorphRelation extends AbstractRelation
         }
     }
 
+    /**
+     * Like HasRelation::aggregate() but adds the morph type filter.
+     *
+     * SQL: SELECT foreign_key AS __group_key, {expression} AS {resultAlias}
+     *      FROM related_table
+     *      WHERE foreign_key IN (...)
+     *        AND morph_type = localAlias  [AND soft-delete filter]
+     *      GROUP BY foreign_key
+     */
+    public function aggregate(array $lookupIds, string $expression, string $resultAlias, string $localAlias, ?\Closure $constraint): array
+    {
+        $builder = $this->relatedModel->builder();
+        $this->relatedModel->handleDeleted();
+
+        $builder
+            ->select("{$this->foreignKey} AS __group_key, {$expression} AS {$resultAlias}")
+            ->whereIn($this->foreignKey, $lookupIds)
+            ->where($this->morphTypeKey, $localAlias)
+            ->groupBy($this->foreignKey);
+
+        if ($constraint) {
+            $constraint($builder);
+        }
+
+        try {
+            $rows = $builder->get()->getResultArray();
+        } finally {
+            $this->relatedModel->reset();
+        }
+
+        $map = [];
+
+        foreach ($rows as $row) {
+            $map[(string) $row['__group_key']] = $row[$resultAlias];
+        }
+
+        return $map;
+    }
+
     public function cascadeDelete(array $localIds, string $localAlias, bool $purge): void
     {
         if (!$this->cascade or empty($localIds)) {

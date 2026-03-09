@@ -127,10 +127,13 @@ class EntityModel
 
     public function find(int|string $id): ?EntityInterface
     {
-        $entity = $this->getFromCache($id);
+        // Skip cache when relations or aggregates are queued — they must be applied to a fresh load
+        if (!$this->hasWith()) {
+            $entity = $this->getFromCache($id);
 
-        if ($entity !== null) {
-            return $entity;
+            if ($entity !== null) {
+                return $entity;
+            }
         }
 
         // Apply condition natively to the builder, then explicitly call the model's first() method
@@ -213,8 +216,10 @@ class EntityModel
             $entities = array_map([$this, 'hydrateRow'], $rows);
 
             $this->loadRelations($entities);
+            $this->loadAggregates($entities);
         } else {
             $entities = [];
+            $this->loadAggregates([]);
         }
 
         $this->reset();
@@ -229,11 +234,14 @@ class EntityModel
         $row = $this->builder->get()->getRowArray();
 
         if (empty($row)) {
+            $this->loadAggregates([]);
             $this->reset();
             return null;
         }
 
         $entity = $this->hydrateRow($row);
+
+        $this->loadAggregates([$entity]);
 
         $this->reset();
 
@@ -505,6 +513,7 @@ class EntityModel
         $this->excludeDeleted  = true;
         $this->joinedRelations = [];
         $this->withRelations   = [];
+        $this->withAggregates  = [];
 
         return $this;
     }
@@ -518,6 +527,11 @@ class EntityModel
     public function paginate(int $perPage = 20, string $group = 'default', int $page = 0): array
     {
         $page = max(1, $page ? : (int) $this->pager->getCurrentPage($group));
+
+        // Apply soft-delete filter first so the COUNT matches the subsequent findAll().
+        // Set excludeDeleted = false afterwards so findAll() does not re-apply the clause.
+        $this->handleDeleted();
+        $this->excludeDeleted = false;
 
         // countAllResults(false) runs COUNT(*) while preserving all WHERE/JOIN conditions
         // so the subsequent findAll() applies the same filters with limit/offset added.

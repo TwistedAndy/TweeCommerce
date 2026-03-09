@@ -93,8 +93,10 @@ trait ModelCache
     {
         $excludeSet = array_flip($excludeIds);
 
+        $value = (string) $value;
+
         foreach (static::$identityMap[$this->alias] as $id => $entity) {
-            if ($entity->getAttribute($field) == $value and !isset($excludeSet[$id])) {
+            if ((string) $entity->getAttribute($field) === $value and !isset($excludeSet[$id])) {
                 unset(static::$identityMap[$this->alias][$id]);
             }
         }

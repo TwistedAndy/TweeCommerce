@@ -65,6 +65,11 @@ class MetaRelation extends AbstractRelation
         $this->relatedModel->save($meta);
     }
 
+    public function aggregate(array $lookupIds, string $expression, string $resultAlias, string $localAlias, ?\Closure $constraint): array
+    {
+        throw EntityException::unsupportedType('meta', 'aggregate');
+    }
+
     public function join(BaseBuilder $builder, string $localTable, string $localAlias, BaseConnection $db, string $column = ''): void
     {
         $entityColumn = $this->relatedConfig['entity_column'] ?? 'entity_id';

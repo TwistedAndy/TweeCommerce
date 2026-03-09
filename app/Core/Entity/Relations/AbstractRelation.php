@@ -79,6 +79,24 @@ abstract class AbstractRelation implements RelationInterface
     {
     }
 
+    /**
+     * Default aggregate implementation — returns an empty map.
+     * Relation types that do not support aggregates (meta, morph-to) inherit this.
+     */
+    public function aggregate(array $lookupIds, string $expression, string $resultAlias, string $localAlias, ?\Closure $constraint): array
+    {
+        return [];
+    }
+
+    /**
+     * Default aggregate key — the parent entity's own PK (local_key).
+     * BelongsOneRelation overrides this to return foreign_key instead.
+     */
+    public function getAggregateKey(): string
+    {
+        return $this->localKey;
+    }
+
     protected function getLocalId(EntityInterface $entity): int|string|null
     {
         return $entity->getAttribute($this->localKey);

@@ -68,6 +68,51 @@ class BelongsOneRelation extends AbstractRelation
         $localModel->update($localId, $entity);
     }
 
+    /**
+     * The FK lives on the local entity, so we match against the related entity's PK.
+     */
+    public function getAggregateKey(): string
+    {
+        return $this->foreignKey;
+    }
+
+    /**
+     * Groups by the related entity's PK (each local entity references it via its FK).
+     *
+     * SQL: SELECT pk AS __group_key, {expression} AS {resultAlias}
+     *      FROM related_table
+     *      WHERE pk IN (fk_values)  [AND soft-delete filter]
+     *      GROUP BY pk
+     */
+    public function aggregate(array $lookupIds, string $expression, string $resultAlias, string $localAlias, ?\Closure $constraint): array
+    {
+        $builder = $this->relatedModel->builder();
+        $this->relatedModel->handleDeleted();
+
+        $builder
+            ->select("{$this->relatedKey} AS __group_key, {$expression} AS {$resultAlias}")
+            ->whereIn($this->relatedKey, $lookupIds)
+            ->groupBy($this->relatedKey);
+
+        if ($constraint) {
+            $constraint($builder);
+        }
+
+        try {
+            $rows = $builder->get()->getResultArray();
+        } finally {
+            $this->relatedModel->reset();
+        }
+
+        $map = [];
+
+        foreach ($rows as $row) {
+            $map[(string) $row['__group_key']] = $row[$resultAlias];
+        }
+
+        return $map;
+    }
+
     public function join(BaseBuilder $builder, string $localTable, string $localAlias, BaseConnection $db, string $column = ''): void
     {
         $builder->join($this->relatedTable, "{$this->relatedTable}.{$this->relatedKey} = {$localTable}.{$this->foreignKey}", 'left');

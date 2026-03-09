@@ -57,6 +57,33 @@ interface RelationInterface
     public function eagerLoad(array $entities, ?\Closure $dynamicConstraint = null): void;
 
     /**
+     * Run an aggregate query for the given parent-side IDs.
+     *
+     * Returns a flat map of [ (string) parent_id => aggregate_value ] suitable for
+     * stamping directly onto the parent entities as virtual attributes.
+     *
+     * @param array    $lookupIds  IDs collected from the parent entities (via getAggregateKey())
+     * @param string   $expression  Ready-to-use SQL expression: COUNT(*), SUM(table.col), …
+     * @param string   $resultAlias SQL column alias for the aggregate value (e.g. 'posts_count').
+     *                              Using the destination attribute name keeps query logs readable and
+     *                              guarantees a unique alias when multiple aggregates share one query.
+     * @param string   $localAlias  Alias of the owning entity (required by pivot/morph relations)
+     * @param ?\Closure $constraint Optional extra WHERE constraints applied to the inner query
+     *
+     * @return array<string, mixed>
+     */
+    public function aggregate(array $lookupIds, string $expression, string $resultAlias, string $localAlias, ?\Closure $constraint): array;
+
+    /**
+     * Return the attribute name on the local entity whose value is used as the lookup key
+     * when matching aggregate results back to their parent entities.
+     *
+     * Defaults to local_key (the parent PK) for most relation types.
+     * BelongsOneRelation overrides this to return foreign_key instead.
+     */
+    public function getAggregateKey(): string;
+
+    /**
      * Cascade a delete operation to one or more parent entity IDs.
      *
      * @param bool $purge true = hard-delete, false = soft-delete (if the related model supports it)

@@ -160,6 +160,58 @@ class BelongsManyRelation extends AbstractRelation
         }
     }
 
+    /**
+     * Groups via the pivot table.
+     *
+     * Regular:
+     *   SELECT pivot.local_col AS __group_key, {expression} AS {resultAlias}
+     *   FROM related_table
+     *   JOIN pivot ON pivot.foreign_col = related_table.pk
+     *   WHERE pivot.local_col IN (...)  [AND soft-delete filter]
+     *   GROUP BY pivot.local_col
+     *
+     * Morph pivot: additionally filters by the morph type column.
+     */
+    public function aggregate(array $lookupIds, string $expression, string $resultAlias, string $localAlias, ?\Closure $constraint): array
+    {
+        $pivot   = $this->registry->getPivotConfig($localAlias, $this->relatedAlias);
+        $builder = $this->relatedModel->builder();
+        $this->relatedModel->handleDeleted();
+
+        if ($this->isMorph) {
+            $builder
+                ->select("{$pivot['table']}.{$this->morphKey} AS __group_key, {$expression} AS {$resultAlias}")
+                ->join($pivot['table'], "{$pivot['table']}.{$this->foreignKey} = {$this->relatedTable}.{$this->relatedKey}")
+                ->whereIn("{$pivot['table']}.{$this->morphKey}", $lookupIds)
+                ->where("{$pivot['table']}.{$this->morphTypeKey}", $localAlias)
+                ->groupBy("{$pivot['table']}.{$this->morphKey}");
+        } else {
+            $builder
+                ->select("{$pivot['table']}.{$pivot['local_column']} AS __group_key, {$expression} AS {$resultAlias}")
+                ->join($pivot['table'], "{$pivot['table']}.{$pivot['foreign_column']} = {$this->relatedTable}.{$this->relatedKey}")
+                ->whereIn("{$pivot['table']}.{$pivot['local_column']}", $lookupIds)
+                ->groupBy("{$pivot['table']}.{$pivot['local_column']}");
+        }
+
+        if ($constraint) {
+            $constraint($builder);
+        }
+
+        try {
+            $rows = $builder->get()->getResultArray();
+        } finally {
+            $this->relatedModel->reset();
+        }
+
+        $map = [];
+
+        foreach ($rows as $row) {
+            $map[(string) $row['__group_key']] = $row[$resultAlias];
+        }
+
+        return $map;
+    }
+
     public function cascadeDelete(array $localIds, string $localAlias, bool $purge): void
     {
         if (!$this->cascade or empty($localIds) or !$purge) {

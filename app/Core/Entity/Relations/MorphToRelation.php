@@ -87,6 +87,11 @@ class MorphToRelation extends AbstractRelation
         $localEntity->setAttribute($this->morphTypeKey, $relatedAlias);
     }
 
+    public function aggregate(array $lookupIds, string $expression, string $resultAlias, string $localAlias, ?\Closure $constraint): array
+    {
+        throw EntityException::unsupportedType('morph-to', 'aggregate');
+    }
+
     public function join(BaseBuilder $builder, string $localTable, string $localAlias, BaseConnection $db, string $column = ''): void
     {
         throw EntityException::unsupportedType('morph-to', 'join');
