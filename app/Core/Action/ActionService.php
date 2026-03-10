@@ -5,26 +5,27 @@ namespace App\Core\Action;
 use App\Core\Container\Container;
 use CodeIgniter\HTTP\CURLRequest;
 use CodeIgniter\Cache\CacheInterface;
+use Psr\Log\LoggerInterface;
 
 class ActionService
 {
     protected array $instantCallbacks  = [];
     protected array $deferredCallbacks = [];
 
-    protected Container      $container;
-    protected CURLRequest    $curl;
-    protected ActionModel    $model;
-    protected CacheInterface $cache;
-
-    protected bool $hasPendingJobs = false;
+    protected Container       $container;
+    protected CURLRequest     $curl;
+    protected ActionModel     $model;
+    protected CacheInterface  $cache;
+    protected LoggerInterface $logger;
 
     protected int $batchInterval;
     protected int $batchTimeout;
     protected int $batchSize;
 
-    public function __construct(Container $container, ActionModel $model, CacheInterface $cache, CURLRequest $curl)
+    public function __construct(Container $container, ActionModel $model, CacheInterface $cache, CURLRequest $curl, LoggerInterface $logger)
     {
         $this->container = $container;
+        $this->logger    = $logger;
         $this->model     = $model;
         $this->cache     = $cache;
         $this->curl      = $curl;
@@ -151,7 +152,6 @@ class ActionService
             }
 
             if ($actions) {
-                $this->hasPendingJobs = true;
                 $this->model->deferBatch($actions, $this->batchInterval, $this->batchTimeout);
             }
 
@@ -180,6 +180,14 @@ class ActionService
         if ($lastCleanup <= $now - $this->batchTimeout) {
             $this->model->retryActions($this->batchTimeout);
             $this->cache->save('actions_retry', $now, $this->batchTimeout);
+        }
+
+        // Prune terminal-state actions once per day to keep the table lean
+        $lastPrune = (int) $this->cache->get('actions_prune');
+
+        if ($lastPrune <= $now - 86400) {
+            $this->model->pruneActions();
+            $this->cache->save('actions_prune', $now, 86400);
         }
 
         while ((time() - $startTime) < $maxRunTime) {
@@ -217,11 +225,19 @@ class ActionService
 
                     // Handle Recursion
                     if (!empty($action['recurring'])) {
-                        $this->handleRecurring($action);
+                        try {
+                            $this->handleRecurring($action);
+                        } catch (\Throwable $e) {
+                            $this->logger->error('Failed to reschedule recurring action #' . ($action['id'] ?? '?') . ': ' . $e->getMessage());
+                        }
                     }
                 } catch (\Throwable $e) {
                     $action['message'] = 'Error: ' . $e->getMessage() . '. Trace: ' . $e->getTraceAsString();
-                    $this->model->failBatch([$action]);
+                    try {
+                        $this->model->failBatch([$action]);
+                    } catch (\Throwable $logError) {
+                        $this->logger->error('Failed to mark action #' . ($action['id'] ?? '?') . ' as failed: ' . $logError->getMessage());
+                    }
                 }
             }
         }
@@ -279,6 +295,8 @@ class ActionService
      */
     public function spawnWorker(): void
     {
+        $dispatched = false;
+
         try {
             $this->curl->request('GET', site_url('actions/run'), [
                 'query'       => ['key' => $this->getSpawnKey()],
@@ -287,11 +305,17 @@ class ActionService
                 'http_errors' => false,
                 'user_agent'  => 'ActionWorker/1.0',
             ]);
+            $dispatched = true;
         } catch (\Throwable $e) {
-            // Skip the timed out exceptions with code 28
-            if (!str_contains($e->getMessage(), '28')) {
-                log_message('error', 'Worker Spawn Error: ' . $e->getMessage(), ['exception' => $e]);
+            if (str_contains($e->getMessage(), '28')) {
+                $dispatched = true;
+            } else {
+                $this->logger->error('Worker Spawn Error: ' . $e->getMessage(), ['exception' => $e]);
             }
+        }
+
+        if (!$dispatched) {
+            $this->runBatch();
         }
     }
 
@@ -300,7 +324,12 @@ class ActionService
      */
     public function checkSpawnKey(string $key): bool
     {
-        return $this->getSpawnKey() === $key;
+        try {
+            return hash_equals($this->getSpawnKey(), $key);
+        } catch (ActionException $e) {
+            $this->logger->error($e->getMessage());
+            return false;
+        }
     }
 
     /**
@@ -346,16 +375,24 @@ class ActionService
                 throw new ActionException('Failed to resolve the recurring time: ' . $recurring);
             }
 
-            if ($nextRun <= $now and !str_contains($recurring, 'next')) {
-                $nextRun = strtotime('next ' . $recurring, $baseTime);
-            }
-
             $attempts = 0;
 
             // Try to resolve the recurring time
             while ($nextRun <= $now and $attempts < 10) {
-                $nextRun = strtotime($recurring, $nextRun);
+                $advanced = strtotime($recurring, $nextRun);
+
+                if ($advanced === false or $advanced <= $nextRun) {
+                    break; // No progress; fall through to the anchor below
+                }
+
+                $nextRun = $advanced;
                 $attempts++;
+            }
+
+            // If still in the past, anchor one second past $now so relative expressions
+            // like 'monday' resolve to the next occurrence rather than today's elapsed slot.
+            if ($nextRun <= $now) {
+                $nextRun = strtotime($recurring, $now + 1);
             }
         }
 

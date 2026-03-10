@@ -137,10 +137,12 @@ class ActionModel extends Model
             $this->whereIn('id', $ids)->set(['status' => self::STATUS_RUNNING, 'updated_at' => $now])->update();
 
             // Update the pending cache
-            foreach ($actions as $action) {
-                unset($this->pendingCache[$action['signature']]);
+            if (is_array($this->pendingCache)) {
+                foreach ($actions as $action) {
+                    unset($this->pendingCache[$action['signature']]);
+                }
             }
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             $this->db->transRollback();
             throw new ActionException('Failed to claim a batch. Error: ' . $e->getMessage());
         }
@@ -210,17 +212,19 @@ class ActionModel extends Model
         $driver  = $this->db->DBDriver;
         $version = $this->db->getVersion();
 
+        // Strip non-numeric suffixes (e.g. "10.6.4-MariaDB" → "10.6.4") before comparing,
+        // because version_compare treats "-MariaDB" as a pre-release tag and returns wrong results.
+        $cleanVersion = (string) preg_replace('/[^0-9.].*$/', '', $version);
+
         switch ($driver) {
             case 'MySQLi':
             case 'MySQL':
-                if (str_contains(strtolower($version), 'maria')) {
-                    $supportSkip = version_compare($version, '10.6.0', '>=');
-                } else {
-                    $supportSkip = version_compare($version, '8.0.1', '>=');
-                }
+                $isMariaDb   = str_contains(strtolower($version), 'mariadb');
+                $threshold   = $isMariaDb ? '10.6.0' : '8.0.1';
+                $supportSkip = version_compare($cleanVersion, $threshold, '>=');
                 break;
             case 'Postgre':
-                $supportSkip = version_compare($version, '9.5', '>=');
+                $supportSkip = version_compare($cleanVersion, '9.5', '>=');
                 break;
             case 'OCI8':
                 $supportSkip = true;
@@ -253,6 +257,10 @@ class ActionModel extends Model
 
         if (strlen($action['signature']) > 32) {
             $action['signature'] = substr($action['signature'], 0, 32);
+        }
+
+        if (isset($action['payload']) and strlen((string) $action['payload']) > 65000) {
+            return false;
         }
 
         if (!empty($action['recurring']) and strlen($action['recurring']) > 64) {
@@ -308,7 +316,7 @@ class ActionModel extends Model
                 'scheduled_at <=' => $time + $interval, // Include future actions
                 'scheduled_at >=' => $time - $timeout, // Exclude stuck actions
                 'status'          => self::STATUS_PENDING,
-            ])->orderBy('id DESC');
+            ])->orderBy('id DESC')->limit(5000); // Cap to avoid loading an unbounded result set
 
             $cache = [];
             $rows  = $builder->get()->getResultArray();
@@ -340,14 +348,25 @@ class ActionModel extends Model
             throw new ActionException('Incorrect status provided: ' . $status);
         }
 
+        // Defined before the try so it is accessible in the catch message
+        $ids = array_column($actions, $this->primaryKey);
+
         try {
-            $ids = array_column($actions, $this->primaryKey);
+            $now    = time();
+            $result = $this->builder()->whereIn('id', $ids)->set(['status' => $status, 'updated_at' => $now])->update();
 
-            $result = $this->whereIn('id', $ids)->set(['status' => $status, 'updated_at' => time()])->update();
-
-            if (!empty($this->pendingCache)) {
+            if (is_array($this->pendingCache)) {
                 foreach ($actions as $action) {
-                    unset($this->pendingCache[$action['signature']]);
+                    if (empty($action['signature'])) {
+                        continue;
+                    }
+                    if ($status === self::STATUS_PENDING) {
+                        // Restore the signature when releasing back to pending so
+                        // subsequent deferBatch calls don't re-insert a duplicate.
+                        $this->pendingCache[$action['signature']] = $action['scheduled_at'] ?? $now;
+                    } else {
+                        unset($this->pendingCache[$action['signature']]);
+                    }
                 }
             }
 
@@ -370,7 +389,7 @@ class ActionModel extends Model
                     'action_id'  => $action[$this->primaryKey],
                     'status'     => $status,
                     'message'    => empty($action['message']) ? $message : $action['message'],
-                    'created_at' => time()
+                    'created_at' => $now,
                 ];
             }
 
@@ -381,10 +400,27 @@ class ActionModel extends Model
 
             return true;
 
-        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
             throw new ActionException('Failed to mark batch as ' . $statuses[$status] . '. Actions: ' . implode(', ', $ids) . '. Error: ' . $e->getMessage());
         }
 
+    }
+
+    /**
+     * Delete completed, failed, and cancelled actions older than the given age
+     * to prevent unbounded table growth. Returns the number of rows deleted.
+     */
+    public function pruneActions(int $maxAgeDays = 30): int
+    {
+        $cutoff = time() - ($maxAgeDays * 86400);
+
+        $this->builder()->whereIn('status', [
+            self::STATUS_COMPLETED,
+            self::STATUS_FAILED,
+            self::STATUS_CANCELED,
+        ])->where('updated_at <', $cutoff)->delete();
+
+        return $this->db->affectedRows();
     }
 
 }
