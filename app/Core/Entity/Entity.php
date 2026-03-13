@@ -43,7 +43,36 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             'container' => $container,
         ], $class);
 
-        static::$entityFields[$class]  = $fields;
+        static::$entityFields[$class] = $fields;
+
+        static::initCaches();
+
+        return $fields;
+    }
+
+    /**
+     * Reset the static entity caches
+     */
+    public static function resetEntity(): void
+    {
+        $class = static::class;
+
+        unset(
+            static::$entityFields[$class],
+            static::$entityAliases[$class],
+            static::$entityMethods[$class],
+            static::$entityGetters[$class],
+            static::$entitySetters[$class],
+        );
+    }
+
+    /**
+     * Fill the static entity caches
+     */
+    protected static function initCaches(): void
+    {
+        $class = static::class;
+
         static::$entityAliases[$class] = $class::getEntityAlias();
         static::$entityGetters[$class] = [];
         static::$entitySetters[$class] = [];
@@ -80,24 +109,6 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
                 static::$entitySetters[$class][$key] = $name;
             }
         }
-
-        return $fields;
-    }
-
-    /**
-     * Reset the static entity caches
-     */
-    public static function resetEntity(): void
-    {
-        $class = static::class;
-
-        unset(
-            static::$entityFields[$class],
-            static::$entityAliases[$class],
-            static::$entityMethods[$class],
-            static::$entityGetters[$class],
-            static::$entitySetters[$class],
-        );
     }
 
     /**
@@ -185,8 +196,8 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
      * Escaped attribute values in the entity format
      */
     protected array  $escaped      = [];
-    protected array  $fieldList    = [];
-    protected array  $relationList = [];
+    protected array  $fieldKeys    = [];
+    protected array  $relationKeys = [];
     protected string $alias;
 
     /**
@@ -220,8 +231,8 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
 
         $this->attributes = $data;
 
-        $this->fieldList    = $this->fields->getFields();
-        $this->relationList = $this->fields->getRelations();
+        $this->fieldKeys    = $this->fields->getFields();
+        $this->relationKeys = $this->fields->getRelations();
     }
 
     public function __isset(string $name): bool
@@ -240,7 +251,7 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             return $this->escaped[$name];
         }
 
-        if (isset($this->relationList[$name])) {
+        if (isset($this->relationKeys[$name])) {
             return $this->getAttribute($name);
         }
 
@@ -252,7 +263,7 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
         } else {
             $value = $this->getAttribute($name);
 
-            if (isset($this->fieldList[$name])) {
+            if (isset($this->fieldKeys[$name])) {
                 $value = $this->fields->castFromStorage($name, $value);
             } elseif ($this->fields->isSerialized($value)) {
                 $value = unserialize($value);
@@ -331,8 +342,8 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             $this->fields       = static::initEntity();
         }
 
-        $this->fieldList    = $this->fields->getFields();
-        $this->relationList = $this->fields->getRelations();
+        $this->fieldKeys    = $this->fields->getFields();
+        $this->relationKeys = $this->fields->getRelations();
     }
 
     /**
@@ -356,7 +367,7 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             return $this->attributes[$key];
         }
 
-        if (isset($this->relationList[$key])) {
+        if (isset($this->relationKeys[$key])) {
             $value = $this->fields->getRelation($key)->get($this);
 
             $this->attributes[$key] = $value;
@@ -383,13 +394,13 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
     /**
      * Set an entity attribute
      */
-    public function setAttribute(string $field, mixed $value): bool
+    public function setAttribute(string $key, mixed $value): bool
     {
-        if (isset($this->relationList[$field])) {
-            $relation = $this->fields->getRelation($field);
+        if (isset($this->relationKeys[$key])) {
+            $relation = $this->fields->getRelation($key);
 
             // Read directly from raw memory arrays to prevent N+1 queries
-            $existing = $this->changes[$field] ?? $this->attributes[$field] ?? null;
+            $existing = $this->changes[$key] ?? $this->attributes[$key] ?? null;
 
             // If assigning an associative array to an existing entity, update it in place
             if ($existing instanceof EntityInterface and is_array($value) and !array_is_list($value)) {
@@ -417,16 +428,16 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             }
 
             // Arrays (has-many/belongs-many) bypass the above checks and assumed to be changed
-            $this->attributes[$field] = $value;
-            $this->changes[$field]    = $value;
+            $this->attributes[$key] = $value;
+            $this->changes[$key]    = $value;
 
             return true;
         }
 
-        $oldValue = $this->getAttribute($field);
+        $oldValue = $this->getAttribute($key);
 
-        if (isset($this->fieldList[$field])) {
-            $newValue = $this->fields->castToStorage($field, $value);
+        if (isset($this->fieldKeys[$key])) {
+            $newValue = $this->fields->castToStorage($key, $value);
         } elseif (is_object($value) or is_array($value)) {
             $newValue = serialize($value);
         } else {
@@ -437,12 +448,12 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             return false;
         }
 
-        unset($this->escaped[$field]);
+        unset($this->escaped[$key]);
 
-        if (array_key_exists($field, $this->attributes) and $this->attributes[$field] === $newValue) {
-            unset($this->changes[$field]);
+        if (array_key_exists($key, $this->attributes) and $this->attributes[$key] === $newValue) {
+            unset($this->changes[$key]);
         } else {
-            $this->changes[$field] = $newValue;
+            $this->changes[$key] = $newValue;
         }
 
         return true;
@@ -451,13 +462,13 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
     /**
      * Check if an attribute or a whole entity has changed
      */
-    public function hasChanged(?string $field = null): bool
+    public function hasChanged(?string $key = null): bool
     {
-        if ($field === null) {
+        if ($key === null) {
             return count($this->changes) > 0;
         }
 
-        return array_key_exists($field, $this->changes);
+        return array_key_exists($key, $this->changes);
     }
 
     /**
@@ -474,7 +485,7 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
     public function flushChanges(): void
     {
         if ($this->changes) {
-            $this->attributes = $this->changes + $this->attributes;
+            $this->attributes = $this->getAttributes();
             $this->changes    = [];
         }
     }

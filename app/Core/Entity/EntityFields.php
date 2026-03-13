@@ -9,6 +9,7 @@ use App\Core\Entity\Relations\BelongsOneRelation;
 use App\Core\Entity\Relations\BelongsManyRelation;
 use App\Core\Entity\Relations\MorphRelation;
 use App\Core\Entity\Relations\MorphToRelation;
+use App\Core\Entity\Relations\TranslationRelation;
 use App\Core\Entity\Relations\MetaRelation;
 
 use App\Core\Libraries\Sanitizer;
@@ -34,6 +35,7 @@ class EntityFields
     protected array $fields       = [];
     protected array $defaults     = [];
     protected array $nullable     = [];
+    protected array $translatable = [];
     protected array $casts        = [];
     protected array $castParams   = [];
     protected array $castHandlers = [];
@@ -59,6 +61,7 @@ class EntityFields
         'morph-many'         => MorphRelation::class,
         'morph-to'           => MorphToRelation::class,
         'morph-belongs-many' => BelongsManyRelation::class,
+        'translation'        => TranslationRelation::class,
         'meta'               => MetaRelation::class,
     ];
 
@@ -283,6 +286,10 @@ class EntityFields
 
         $field['default'] = $this->defaults[$key];
 
+        if (!empty($field['translate']) and $cast !== 'relation') {
+            $this->translatable[$key] = true;
+        }
+
         $this->fields[$key] = $field;
     }
 
@@ -292,6 +299,16 @@ class EntityFields
     public function getFields(): array
     {
         return $this->fields;
+    }
+
+    /**
+     * Get a fast-lookup map of field names that have 'translate' => true.
+     *
+     * @return array<string, true>
+     */
+    public function getTranslatable(): array
+    {
+        return $this->translatable;
     }
 
     /**
@@ -374,7 +391,7 @@ class EntityFields
         // entity is required for built-in types; morph-to and custom classes resolve it dynamically
         $entity = $relation['entity'] ?? '';
 
-        if (!is_string($entity) or ($isBuiltinClass and $type !== 'morph-to' and empty($entity))) {
+        if (!is_string($entity) or ($isBuiltinClass and $type !== 'morph-to' and $type !== 'translation' and empty($entity))) {
             throw EntityException::missingRelationAlias($key);
         }
 
@@ -498,10 +515,10 @@ class EntityFields
     /**
      * Get a field default value in the storage format
      */
-    public function getDefaultValue(string $field): mixed
+    public function getDefaultValue(string $key): mixed
     {
-        if (array_key_exists($field, $this->defaults)) {
-            return $this->defaults[$field];
+        if (array_key_exists($key, $this->defaults)) {
+            return $this->defaults[$key];
         }
 
         return null;
@@ -510,13 +527,13 @@ class EntityFields
     /**
      * Convert a field value in the storage format
      */
-    public function castToStorage(string $field, mixed $value): mixed
+    public function castToStorage(string $key, mixed $value): mixed
     {
-        if (!isset($this->casts[$field]) or ($value === null and isset($this->nullable[$field]))) {
+        if (!isset($this->casts[$key]) or ($value === null and isset($this->nullable[$key]))) {
             return $value;
         }
 
-        $cast = $this->casts[$field];
+        $cast = $this->casts[$key];
 
         switch ($cast) {
             case 'int':
@@ -534,7 +551,7 @@ class EntityFields
                     $value = strtotime($value);
 
                     if ($value === false) {
-                        return isset($this->nullable[$field]) ? null : 0;
+                        return isset($this->nullable[$key]) ? null : 0;
                     }
 
                     return $value;
@@ -544,7 +561,7 @@ class EntityFields
                     return $value->getTimestamp();
                 }
 
-                return isset($this->nullable[$field]) ? null : 0;
+                return isset($this->nullable[$key]) ? null : 0;
             case 'html':
             case 'html-full':
             case 'html-basic':
@@ -593,7 +610,7 @@ class EntityFields
             case 'datetime-ms':
             case 'datetime-us':
                 if ($value instanceof DateTimeInterface) {
-                    return $value->format($this->dateFormats[$field]);
+                    return $value->format($this->dateFormats[$key]);
                 }
 
                 if (is_numeric($value)) {
@@ -603,16 +620,16 @@ class EntityFields
                 }
 
                 if ($timestamp !== false) {
-                    return date($this->dateFormats[$field], $timestamp);
+                    return date($this->dateFormats[$key], $timestamp);
                 }
 
-                return isset($this->nullable[$field]) ? null : date($this->dateFormats[$field], 0);
+                return isset($this->nullable[$key]) ? null : date($this->dateFormats[$key], 0);
             case 'uri':
                 return $this->sanitizer->sanitizeUri((string) $value);
             default:
-                if (isset($this->castHandlers[$field])) {
-                    $handler = $this->castHandlers[$field];
-                    $value   = $handler::set($value, $this->castParams[$field]);
+                if (isset($this->castHandlers[$key])) {
+                    $handler = $this->castHandlers[$key];
+                    $value   = $handler::set($value, $this->castParams[$key]);
                 }
         }
 
@@ -622,13 +639,13 @@ class EntityFields
     /**
      * Convert a field value from the storage format
      */
-    public function castFromStorage(string $field, mixed $value): mixed
+    public function castFromStorage(string $key, mixed $value): mixed
     {
-        if (!isset($this->casts[$field]) or ($value === null and isset($this->nullable[$field]))) {
+        if (!isset($this->casts[$key]) or ($value === null and isset($this->nullable[$key]))) {
             return $value;
         }
 
-        $cast = $this->casts[$field];
+        $cast = $this->casts[$key];
 
         switch ($cast) {
             case 'int':
@@ -678,23 +695,23 @@ class EntityFields
                     $value = strtotime($value);
 
                     if ($value === false) {
-                        return isset($this->nullable[$field]) ? null : 0;
+                        return isset($this->nullable[$key]) ? null : 0;
                     }
 
                     return $value;
                 }
 
                 if ($value instanceof DateTimeInterface) {
-                    return $value->format($this->dateFormats[$field]);
+                    return $value->format($this->dateFormats[$key]);
                 }
 
-                return isset($this->nullable[$field]) ? null : 0;
+                return isset($this->nullable[$key]) ? null : 0;
             case 'bool':
                 return (bool) $value;
             default:
-                if (isset($this->castHandlers[$field])) {
-                    $handler = $this->castHandlers[$field];
-                    $value   = $handler::get($value, $this->castParams[$field]);
+                if (isset($this->castHandlers[$key])) {
+                    $handler = $this->castHandlers[$key];
+                    $value   = $handler::get($value, $this->castParams[$key]);
                 }
         }
 

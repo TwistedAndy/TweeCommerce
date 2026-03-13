@@ -44,12 +44,12 @@ interface EntityInterface
     /**
      * Internal method to set a single attribute with change tracking and casting.
      */
-    public function setAttribute(string $field, mixed $value): bool;
+    public function setAttribute(string $key, mixed $value): bool;
 
     /**
      * Check if an attribute or a whole entity has changed
      */
-    public function hasChanged(?string $field = null): bool;
+    public function hasChanged(?string $key = null): bool;
 
     /**
      * Get changed attributes with new values

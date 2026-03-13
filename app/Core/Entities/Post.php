@@ -2,11 +2,10 @@
 
 namespace App\Core\Entities;
 
-use App\Core\Entity\Entity;
+use App\Core\Entity\TranslatableEntity;
 
-class Post extends Entity
+class Post extends TranslatableEntity
 {
-
     protected static function getEntityAlias(): string
     {
         return 'post';
@@ -24,14 +23,17 @@ class Post extends Entity
                 'rules' => 'required'
             ],
             'title'      => [
-                'type'  => 'text',
-                'rules' => 'required'
+                'type'      => 'text',
+                'rules'     => 'required',
+                'translate' => true,
             ],
             'excerpt'    => [
-                'type' => 'text'
+                'type'      => 'text',
+                'translate' => true,
             ],
             'content'    => [
-                'type' => 'html'
+                'type'      => 'html',
+                'translate' => true,
             ],
             'status'     => [
                 'type'    => 'text',
