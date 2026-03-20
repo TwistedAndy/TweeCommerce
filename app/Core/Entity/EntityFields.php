@@ -653,7 +653,7 @@ class EntityFields
                 return (int) $value;
             case 'key':
             case 'text':
-                return htmlspecialchars((string) $value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+                return htmlspecialchars((string) $value);
             case 'html':
             case 'html-full':
             case 'html-basic':

@@ -15,6 +15,16 @@ use Traversable;
 class Entity implements EntityInterface, JsonSerializable, ArrayAccess, IteratorAggregate
 {
     /**
+     * A translation key with the translation primary key
+     */
+    public const TRANSLATION_ID = '_id';
+
+    /**
+     * An internal field key to store all entity translations
+     */
+    public const TRANSLATION_KEY = '_translations';
+
+    /**
      * Entity Field Caches
      */
     protected static array $entityFields  = [];
@@ -38,8 +48,25 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             $container = Container::getInstance();
         }
 
+        $entityFields = $class::getEntityFields();
+
+        // Add the translation relation if there's a field marked with 'translate' => true
+        foreach ($entityFields as $field) {
+            if (!empty($field['translate'])) {
+                $entityFields[self::TRANSLATION_KEY] = [
+                    'type'     => 'relation',
+                    'relation' => [
+                        'type'    => 'translation',
+                        'entity'  => '',
+                        'cascade' => true,
+                    ],
+                ];
+                break;
+            }
+        }
+
         $fields = $container->make(EntityFields::class, [
-            'fields'    => $class::getEntityFields(),
+            'fields'    => $entityFields,
             'container' => $container,
         ], $class);
 
@@ -90,6 +117,13 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             'getChanges',
             'getFields',
             'getAlias',
+            'getLocale',
+            'setLocale',
+            'getTranslatable',
+            'getTranslations',
+            'getTranslation',
+            'getTranslationId',
+            'setTranslation',
         ], true);
 
         foreach ($methods as $method) {
@@ -207,6 +241,19 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
 
     protected bool $customFields = false;
 
+    /**
+     * Currently selected locale (empty string = no active locale / non-translatable)
+     */
+    protected string $locale = '';
+
+    /**
+     * Fast-lookup map of translatable field names: ['title' => true, ...]
+     * Empty array means the entity has no translatable fields
+     *
+     * @var array<string, true>
+     */
+    protected array $translatable = [];
+
     public function __construct(array $data = [], ?string $alias = null, ?EntityFields $fields = null)
     {
         $class = static::class;
@@ -233,6 +280,11 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
 
         $this->fieldKeys    = $this->fields->getFields();
         $this->relationKeys = $this->fields->getRelations();
+        $this->translatable = $this->fields->getTranslatable();
+
+        if ($this->translatable and !isset($this->attributes[self::TRANSLATION_KEY])) {
+            $this->attributes[self::TRANSLATION_KEY] = [];
+        }
     }
 
     public function __isset(string $name): bool
@@ -247,6 +299,25 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
 
     public function __get(string $name): mixed
     {
+        // Check for a translation when a locale is set AND a field is translatable
+        if ($this->locale !== '' and isset($this->translatable[$name])) {
+            $key = $this->locale . $name;
+
+            if (array_key_exists($key, $this->escaped)) {
+                return $this->escaped[$key];
+            }
+
+            $value = $this->getAttribute($name);
+
+            if (isset($this->fieldKeys[$name])) {
+                $value = $this->fields->castFromStorage($name, $value);
+            } elseif ($this->fields->isSerialized($value)) {
+                $value = unserialize($value);
+            }
+
+            return $this->escaped[$key] = $value;
+        }
+
         if (array_key_exists($name, $this->escaped)) {
             return $this->escaped[$name];
         }
@@ -297,16 +368,18 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
             static::$entityMethods[$method] = $field;
         }
 
-        if (str_starts_with($method, 'get')) {
+        $prefix = substr($method, 0, 3);
+
+        if ($prefix === 'get') {
             return $this->__get($field);
         }
 
-        if (str_starts_with($method, 'set')) {
+        if ($prefix === 'set') {
             $this->__set($field, $arguments[0]);
             return array_key_exists($field, $this->changes);
         }
 
-        if (str_starts_with($method, 'has')) {
+        if ($prefix === 'has') {
             return $this->__isset($field);
         }
 
@@ -323,6 +396,10 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
 
         if ($this->customFields) {
             $data['fields'] = $this->fields;
+        }
+
+        if ($this->locale !== '') {
+            $data['locale'] = $this->locale;
         }
 
         return $data;
@@ -344,6 +421,16 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
 
         $this->fieldKeys    = $this->fields->getFields();
         $this->relationKeys = $this->fields->getRelations();
+
+        $this->translatable = $this->fields->getTranslatable();
+
+        if ($this->translatable) {
+            if (!isset($this->attributes[self::TRANSLATION_KEY])) {
+                $this->attributes[self::TRANSLATION_KEY] = [];
+            }
+
+            $this->setLocale($data['locale'] ?? '');
+        }
     }
 
     /**
@@ -351,7 +438,18 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
      */
     public function getAttributes(): array
     {
-        return $this->changes ? ($this->changes + $this->attributes) : $this->attributes;
+        if (!$this->changes) {
+            return $this->attributes;
+        }
+
+        $attributes = $this->changes + $this->attributes;
+
+        // When translation changes exist, merge them by locale
+        if ($this->translatable and $this->changes[self::TRANSLATION_KEY] ?? null) {
+            $attributes[self::TRANSLATION_KEY] = $this->getTranslations(true);
+        }
+
+        return $attributes;
     }
 
     /**
@@ -359,6 +457,20 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
      */
     public function getAttribute(string $key): mixed
     {
+        if ($this->locale !== '' and isset($this->translatable[$key])) {
+            $changes = $this->changes[self::TRANSLATION_KEY][$this->locale] ?? null;
+
+            if ($changes !== null and array_key_exists($key, $changes)) {
+                return $changes[$key];
+            }
+
+            $translation = $this->getTranslation($this->locale);
+
+            if (array_key_exists($key, $translation)) {
+                return $translation[$key];
+            }
+        }
+
         if (array_key_exists($key, $this->changes)) {
             return $this->changes[$key];
         }
@@ -396,6 +508,24 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
      */
     public function setAttribute(string $key, mixed $value): bool
     {
+        if ($this->locale !== '' and isset($this->translatable[$key])) {
+            $newValue = $this->fields->castToStorage($key, $value);
+            $oldValue = $this->getAttribute($key);
+
+            if ($oldValue === $newValue) {
+                return false;
+            }
+
+            $changes       = $this->changes[self::TRANSLATION_KEY][$this->locale] ?? [];
+            $changes[$key] = $newValue;
+
+            $this->changes[self::TRANSLATION_KEY][$this->locale] = $changes;
+
+            unset($this->escaped[$this->locale . $key]);
+
+            return true;
+        }
+
         if (isset($this->relationKeys[$key])) {
             $relation = $this->fields->getRelation($key);
 
@@ -465,7 +595,7 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
     public function hasChanged(?string $key = null): bool
     {
         if ($key === null) {
-            return count($this->changes) > 0;
+            return $this->changes !== [];
         }
 
         return array_key_exists($key, $this->changes);
@@ -557,5 +687,139 @@ class Entity implements EntityInterface, JsonSerializable, ArrayAccess, Iterator
     public function offsetUnset(mixed $offset): void
     {
         $this->__unset($offset);
+    }
+
+    /**
+     * Get the current entity locale
+     */
+    public function getLocale(): string
+    {
+        return $this->locale;
+    }
+
+    /**
+     * Set the current entity locale
+     */
+    public function setLocale(string $locale): void
+    {
+        if ($this->translatable) {
+            $this->locale = $locale;
+        }
+    }
+
+    /**
+     * Return all translations, optionally triggering a full DB load first.
+     *
+     * @return array<string, array<string, mixed>>  locale → field data
+     */
+    public function getTranslations(bool $onlyLoaded = false): array
+    {
+        if (empty($this->translatable)) {
+            return [];
+        }
+
+        if (!$onlyLoaded) {
+            $currentLocale = $this->locale;
+            $this->locale  = '';
+
+            $translations = $this->fields->getRelation(self::TRANSLATION_KEY)->get($this);
+
+            foreach ($translations as $locale => $data) {
+                $this->setTranslation($locale, $data);
+            }
+
+            $this->locale = $currentLocale;
+        }
+
+        $translations = $this->attributes[self::TRANSLATION_KEY];
+
+        if ($this->changes[self::TRANSLATION_KEY] ?? null) {
+            foreach ($this->changes[self::TRANSLATION_KEY] as $locale => $fields) {
+                $translations[$locale] = $fields + ($translations[$locale] ?? []);
+            }
+        }
+
+        return $translations;
+    }
+
+    /**
+     * Return translated field data for a single locale, lazy-loading if needed.
+     *
+     * @return array<string, mixed>
+     */
+    public function getTranslation(string $locale): array
+    {
+        if ($locale === '') {
+            return [];
+        }
+
+        $translation = $this->attributes[self::TRANSLATION_KEY][$locale] ?? null;
+
+        if ($translation === null) {
+            $currentLocale = $this->locale;
+            $this->locale  = $locale;
+            $translations  = $this->fields->getRelation(self::TRANSLATION_KEY)->get($this);
+            $this->locale  = $currentLocale;
+
+            foreach ($translations as $key => $data) {
+                $this->setTranslation($key, $data);
+            }
+
+            if (isset($translations[$locale])) {
+                $translation = $translations[$locale];
+            } else {
+                $translation = [];
+
+                // Prevent loading the non-existing locale again
+                $this->attributes[self::TRANSLATION_KEY][$locale] = $translation;
+            }
+        }
+
+        if ($this->changes[self::TRANSLATION_KEY][$locale] ?? null) {
+            $translation = $this->changes[self::TRANSLATION_KEY][$locale] + $translation;
+        }
+
+        return $translation;
+    }
+
+    public function getTranslationId(string $locale): int|string|null
+    {
+        $translation = $this->getTranslation($locale);
+
+        return $translation[self::TRANSLATION_ID] ?? null;
+    }
+
+    /**
+     * Store translation fields for a locale directly in attributes without marking the entity dirty.
+     * Also records the Translation ID so update() can issue UPDATE vs INSERT correctly.
+     * A null $id means the locale was loaded but has not been stored in the database yet.
+     *
+     * @param string $locale
+     * @param array<string, mixed> $data     Translated field values in the storage format
+     * @param int|string|null $translationId Translation primary key, or null if no row exists
+     */
+    public function setTranslation(string $locale, array $data, int|string|null $translationId = null): void
+    {
+        if ($locale === '') {
+            return;
+        }
+
+        $existing = $this->attributes[self::TRANSLATION_KEY][$locale] ?? null;
+
+        if ($existing) {
+            if (empty($translationId) and !empty($existing[self::TRANSLATION_ID])) {
+                $translationId = $existing[self::TRANSLATION_ID];
+            }
+
+            foreach ($this->translatable as $field => $value) {
+                unset($this->escaped[$locale . $field]);
+            }
+        }
+
+        if (!array_key_exists(self::TRANSLATION_ID, $data)) {
+            $data[self::TRANSLATION_ID] = $translationId;
+        }
+
+        $this->attributes[self::TRANSLATION_KEY][$locale] = $data;
     }
 }

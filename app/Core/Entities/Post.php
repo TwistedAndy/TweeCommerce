@@ -2,9 +2,9 @@
 
 namespace App\Core\Entities;
 
-use App\Core\Entity\TranslatableEntity;
+use App\Core\Entity\Entity;
 
-class Post extends TranslatableEntity
+class Post extends Entity
 {
     protected static function getEntityAlias(): string
     {

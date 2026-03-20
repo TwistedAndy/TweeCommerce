@@ -2,10 +2,12 @@
 
 namespace App\Core\Entity\Traits;
 
+use App\Core\Entity\Entity;
 use App\Core\Entity\EntityException;
 use App\Core\Entity\EntityFields;
 use App\Core\Entity\EntityInterface;
 use App\Core\Entity\Relations\RelationInterface;
+use CodeIgniter\Database\BaseBuilder;
 
 /**
  * Entity Relations Trait
@@ -90,6 +92,40 @@ trait ModelRelations
         $this->withRelations = [];
 
         return $this;
+    }
+
+    /**
+     * Eager-load translations for entities with translatable fields.
+     *
+     * withTranslations()            — load all locales
+     * withTranslations('pl')        — load only Polish
+     * withTranslations(['pl','fr']) — load Polish and French
+     */
+    public function withTranslations(string|array|null $locales = null): static
+    {
+        if (empty($this->fields->getTranslatable())) {
+            return $this;
+        }
+
+        $key = Entity::TRANSLATION_KEY;
+
+        if ($locales === null) {
+            return $this->with([$key]);
+        }
+
+        $locales      = (array) $locales;
+        $config       = $this->registry->getConfig($this->alias)['translation'] ?? [];
+        $localeColumn = $config['locale_column'] ?? 'locale';
+
+        return $this->with([
+            $key => function (BaseBuilder $builder) use ($locales, $localeColumn) {
+                if (count($locales) === 1) {
+                    $builder->where($localeColumn, $locales[0]);
+                } else {
+                    $builder->whereIn($localeColumn, $locales);
+                }
+            },
+        ]);
     }
 
     /**

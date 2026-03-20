@@ -2,20 +2,19 @@
 
 namespace App\Core\Entity\Relations;
 
+use App\Core\Entity\Entity;
 use App\Core\Entity\EntityException;
 use App\Core\Entity\EntityInterface;
 use App\Core\Entity\EntityModel;
 use App\Core\Entity\EntityRegistry;
-use App\Core\Entity\TranslatableEntity;
 use CodeIgniter\Database\BaseBuilder;
 use CodeIgniter\Database\BaseConnection;
 
 /**
- * Handles lazy/eager loading, saving, and cascade-deleting translations for a TranslatableEntity.
- *
- * Queries are issued through the local entity's model builder — the same pattern used by
- * BelongsManyRelation for pivot tables. Registered as the 'translation' relation type in
- * EntityFields::RELATION_TYPES.
+ * Handles lazy/eager loading, saving, and cascade-deleting translations for entities with
+ * translatable fields. Queries are issued through the local entity's model builder — the same
+ * pattern used by BelongsManyRelation for pivot tables. Registered as the 'translation'
+ * relation type in EntityFields::RELATION_TYPES.
  */
 class TranslationRelation extends AbstractRelation
 {
@@ -65,7 +64,7 @@ class TranslationRelation extends AbstractRelation
             return [];
         }
 
-        $locale  = $entity instanceof TranslatableEntity ? $entity->getLocale() : '';
+        $locale  = $entity->getLocale();
         $model   = $this->registry->getModel($alias);
         $builder = $model->builder($table)->where($entityColumn, $localId);
 
@@ -77,18 +76,22 @@ class TranslationRelation extends AbstractRelation
 
         [$dataMap, $idMap] = $this->hydrateRows($rows, $localeColumn, $relatedKey, $entity->getFields()->getTranslatable());
 
-        if ($entity instanceof TranslatableEntity) {
-            if ($locale !== '') {
-                // Single-locale load: record even a miss so getAttribute() does not re-query.
-                $entity->setTranslation($locale, $dataMap[$locale] ?? [], $idMap[$locale] ?? null);
-            } else {
-                foreach ($dataMap as $loc => $data) {
-                    $entity->setTranslation($loc, $data, $idMap[$loc] ?? null);
-                }
-            }
+        // Embed the translation row ID into each locale's data array so the caller
+        // can store it without needing a separate id map.
+        $result = [];
+
+        foreach ($dataMap as $loc => $data) {
+            $result[$loc]                         = $data;
+            $result[$loc][Entity::TRANSLATION_ID] = $idMap[$loc] ?? null;
         }
 
-        return $dataMap;
+        // For a single-locale query always include the locale even on a miss,
+        // so the caller knows it was queried and can avoid a re-query.
+        if ($locale !== '' && !isset($result[$locale])) {
+            $result[$locale] = [Entity::TRANSLATION_ID => null];
+        }
+
+        return $result;
     }
 
     /**
@@ -151,13 +154,8 @@ class TranslationRelation extends AbstractRelation
             [$dataMap, $idMap] = $this->hydrateRows($grouped[$localId] ?? [], $localeColumn, $relatedKey, $translatable);
 
             foreach ($group as $entity) {
-                if ($entity instanceof TranslatableEntity) {
-                    foreach ($dataMap as $locale => $data) {
-                        $entity->setTranslation($locale, $data, $idMap[$locale] ?? null);
-                    }
-                } else {
-                    $entity->setAttribute($this->relationName, $dataMap);
-                    $entity->flushChanges();
+                foreach ($dataMap as $locale => $data) {
+                    $entity->setTranslation($locale, $data, $idMap[$locale] ?? null);
                 }
             }
         }
@@ -222,7 +220,7 @@ class TranslationRelation extends AbstractRelation
                 }
             }
 
-            $translationId = $localEntity instanceof TranslatableEntity ? $localEntity->getTranslationId($locale) : null;
+            $translationId = $localEntity->getTranslationId($locale);
 
             if ($translationId) {
                 $model->builder($table)
@@ -236,13 +234,13 @@ class TranslationRelation extends AbstractRelation
         }
 
         // Inject newly generated row IDs back so subsequent saves use UPDATE, not INSERT.
-        if ($newIds and $localEntity instanceof TranslatableEntity) {
+        if ($newIds) {
             foreach ($newIds as $locale => $newId) {
                 $values = $relatedData[$locale];
 
                 $stored = [];
 
-                foreach ($translatable as $field => $_) {
+                foreach ($translatable as $field => $flag) {
                     if (array_key_exists($field, $values)) {
                         $stored[$field] = $values[$field];
                     }

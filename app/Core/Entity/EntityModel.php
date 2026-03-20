@@ -3,7 +3,6 @@
 namespace App\Core\Entity;
 
 use App\Core\Entity\Traits\ModelCache;
-use App\Core\Entity\TranslatableEntity;
 use App\Core\Entity\Traits\ModelRelations;
 use App\Core\Entity\Traits\QueryBuilder;
 
@@ -569,40 +568,6 @@ class EntityModel
         $this->excludeDeleted = false;
 
         return $this;
-    }
-
-    /**
-     * Eager-load translations for a TranslatableEntity.
-     *
-     * withTranslations()            — load all locales
-     * withTranslations('pl')        — load only Polish
-     * withTranslations(['pl','fr']) — load Polish and French
-     */
-    public function withTranslations(string|array|null $locales = null): static
-    {
-        if (!is_a($this->class, TranslatableEntity::class, true)) {
-            return $this;
-        }
-
-        $key = $this->class::getTranslationKey();
-
-        if ($locales === null) {
-            return $this->with([$key]);
-        }
-
-        $locales      = (array) $locales;
-        $config       = $this->registry->getConfig($this->alias)['translation'] ?? [];
-        $localeColumn = $config['locale_column'] ?? 'locale';
-
-        return $this->with([
-            $key => function (BaseBuilder $builder) use ($locales, $localeColumn) {
-                if (count($locales) === 1) {
-                    $builder->where($localeColumn, $locales[0]);
-                } else {
-                    $builder->whereIn($localeColumn, $locales);
-                }
-            },
-        ]);
     }
 
     public function hydrateRow(array $row): EntityInterface
