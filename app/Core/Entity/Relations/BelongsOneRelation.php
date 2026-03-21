@@ -4,19 +4,11 @@ namespace App\Core\Entity\Relations;
 
 use App\Core\Entity\EntityInterface;
 use App\Core\Entity\EntityModel;
-use App\Core\Entity\EntityRegistry;
 use CodeIgniter\Database\BaseBuilder;
-use CodeIgniter\Database\BaseConnection;
+use App\Core\Entity\EntityRegistry;
 
 class BelongsOneRelation extends AbstractRelation
 {
-    public function __construct(string $name, array $relation, EntityRegistry $registry)
-    {
-        parent::__construct($name, $relation, $registry);
-        $this->isMultiple = false;
-        $this->initRelation($relation['entity']);
-    }
-
     public function getType(): string
     {
         return 'belongs-one';
@@ -39,7 +31,10 @@ class BelongsOneRelation extends AbstractRelation
             $relatedId = $relatedEntity->getAttribute($this->relatedKey);
 
             if (empty($relatedId) or $relatedEntity->hasChanged()) {
-                $this->relatedModel->save($relatedEntity);
+                if (!$this->relatedModel->save($relatedEntity)) {
+                    return;
+                }
+
                 $relatedId = $relatedEntity->getAttribute($this->relatedKey);
             }
         } else {
@@ -47,25 +42,6 @@ class BelongsOneRelation extends AbstractRelation
         }
 
         $localEntity->setAttribute($this->foreignKey, $relatedId);
-    }
-
-    public function remove(int|string|EntityInterface|null $localEntity, string $localAlias): void
-    {
-        $localId = $localEntity instanceof EntityInterface ? $this->getLocalId($localEntity) : $localEntity;
-
-        if (empty($localId)) {
-            return;
-        }
-
-        $localModel = $this->registry->getModel($localAlias);
-        $entity     = $localModel->find($localId);
-
-        if ($entity === null) {
-            return;
-        }
-
-        $entity->setAttribute($this->foreignKey, null);
-        $localModel->update($localId, $entity);
     }
 
     /**
@@ -98,23 +74,12 @@ class BelongsOneRelation extends AbstractRelation
             $constraint($builder);
         }
 
-        try {
-            $rows = $builder->get()->getResultArray();
-        } finally {
-            $this->relatedModel->reset();
-        }
-
-        $map = [];
-
-        foreach ($rows as $row) {
-            $map[(string) $row['__group_key']] = $row[$resultAlias];
-        }
-
-        return $map;
+        return $this->runAggregateQuery($builder, $resultAlias);
     }
 
-    public function join(BaseBuilder $builder, string $localTable, string $localAlias, BaseConnection $db, string $column = ''): void
+    public function join(BaseBuilder $builder, string $localAlias, string $column = ''): void
     {
+        $localTable = $this->registry->getEntityTable($localAlias);
         $builder->join($this->relatedTable, "{$this->relatedTable}.{$this->relatedKey} = {$localTable}.{$this->foreignKey}", 'left');
     }
 
@@ -130,21 +95,15 @@ class BelongsOneRelation extends AbstractRelation
         return $this->relatedModel;
     }
 
-    public function eagerLoad(array $entities, ?\Closure $dynamicConstraint = null): void
+    public function preload(array $entities, ?\Closure $dynamicConstraint = null): void
     {
         if (empty($entities)) {
             return;
         }
 
-        $localIds = [];
+        $localIds = $this->collectIds($entities, $this->foreignKey);
 
-        foreach ($entities as $entity) {
-            $localIds[] = $entity->getAttribute($this->foreignKey);
-        }
-
-        $localIds = array_filter(array_unique($localIds));
-
-        if (empty($localIds)) {
+        if (!$localIds) {
             return;
         }
 
@@ -169,18 +128,6 @@ class BelongsOneRelation extends AbstractRelation
             $relatedByKey[$key][] = $this->relatedModel->hydrateRow($row);
         }
 
-        foreach ($entities as $parentEntity) {
-            $parentId = (string) $this->getForeignId($parentEntity);
-
-            if (empty($parentId)) {
-                $parentEntity->setAttribute($this->relationName, null);
-                $parentEntity->flushChanges();
-                continue;
-            }
-
-            $matched = $relatedByKey[$parentId] ?? [];
-            $parentEntity->setAttribute($this->relationName, $matched[0] ?? null);
-            $parentEntity->flushChanges();
-        }
+        $this->assignFromMap($entities, $relatedByKey, $this->foreignKey);
     }
 }

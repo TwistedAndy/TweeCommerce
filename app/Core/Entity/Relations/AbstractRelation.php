@@ -35,6 +35,10 @@ abstract class AbstractRelation implements RelationInterface
         $this->constraint   = $relation['constraint'] ?? [];
         $this->cascade      = (bool) ($relation['cascade'] ?? false);
         $this->relationName = $name;
+
+        if (!empty($relation['entity'])) {
+            $this->initRelation($relation['entity']);
+        }
     }
 
     /**
@@ -67,8 +71,13 @@ abstract class AbstractRelation implements RelationInterface
         return $this->isMultiple ? $this->resolveMany($value) : $this->resolveOne($value);
     }
 
-    public function remove(int|string|EntityInterface|null $localEntity, string $localAlias): void
+    public function get(EntityInterface $entity): EntityInterface|array|null
     {
+        if (!$this->getLocalId($entity)) {
+            return $this->isMultiple ? [] : null;
+        }
+
+        return $this->isMultiple ? $this->query($entity)->findAll() : $this->query($entity)->first();
     }
 
     public function cascadeDelete(array $localIds, string $localAlias, bool $purge): void
@@ -227,6 +236,74 @@ abstract class AbstractRelation implements RelationInterface
         }
 
         return $entities;
+    }
+
+    /**
+     * Collect unique non-empty IDs from a set of entities in a single pass.
+     * Faster than a foreach + array_unique + array_filter chain.
+     *
+     * @param EntityInterface[] $entities
+     * @param string $key
+     *
+     * @return array
+     */
+    protected function collectIds(array $entities, string $key): array
+    {
+        $ids = [];
+
+        foreach ($entities as $entity) {
+            $id = $entity->getAttribute($key);
+
+            if ($id !== null and $id !== '') {
+                $ids[$id] = true;
+            }
+        }
+
+        return array_keys($ids);
+    }
+
+    /**
+     * Execute an aggregate builder query and return a [parent_id => value] map.
+     * The builder must SELECT a column aliased as __group_key.
+     */
+    protected function runAggregateQuery(BaseBuilder $builder, string $resultAlias): array
+    {
+        try {
+            $rows = $builder->get()->getResultArray();
+        } finally {
+            $this->relatedModel->reset();
+        }
+
+        $map = [];
+
+        foreach ($rows as $row) {
+            $map[(string) $row['__group_key']] = $row[$resultAlias];
+        }
+
+        return $map;
+    }
+
+    /**
+     * Stamp eager-loaded results back onto each parent entity.
+     *
+     * @param string $idKey The attribute on each entity used to look up $relatedByKey
+     */
+    protected function assignFromMap(array $entities, array $relatedByKey, string $idKey): void
+    {
+        foreach ($entities as $entity) {
+            $parentId = (string) $entity->getAttribute($idKey);
+
+            if (!$parentId) {
+                $value = $this->isMultiple ? [] : null;
+            } elseif ($this->isMultiple) {
+                $value = $relatedByKey[$parentId] ?? [];
+            } else {
+                $value = $relatedByKey[$parentId][0] ?? null;
+            }
+
+            $entity->setAttribute($this->relationName, $value);
+            $entity->flushChanges();
+        }
     }
 
     protected function detachOrphans(string $foreignKey, int|string $localId, array $excludeIds = []): void

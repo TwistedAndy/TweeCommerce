@@ -6,20 +6,19 @@ use App\Core\Entity\EntityInterface;
 use App\Core\Entity\EntityModel;
 use App\Core\Entity\EntityRegistry;
 use CodeIgniter\Database\BaseBuilder;
-use CodeIgniter\Database\BaseConnection;
 
 class BelongsManyRelation extends AbstractRelation
 {
     protected bool   $isMorph      = false;
-    protected string $morphTypeKey = '';
     protected string $morphKey     = '';
+    protected string $morphTypeKey = '';
 
     public function __construct(string $name, array $relation, EntityRegistry $registry)
     {
         parent::__construct($name, $relation, $registry);
+
         $this->isMultiple = true;
         $this->isMorph    = ($relation['type'] === 'morph-belongs-many');
-        $this->initRelation($relation['entity']);
 
         if ($this->isMorph) {
             $morphKey           = $relation['morph_key'];
@@ -35,11 +34,6 @@ class BelongsManyRelation extends AbstractRelation
     public function getType(): string
     {
         return $this->isMorph ? 'morph-belongs-many' : 'belongs-many';
-    }
-
-    public function get(EntityInterface $entity): EntityInterface|array|null
-    {
-        return $this->query($entity)->findAll();
     }
 
     public function update(EntityInterface $localEntity, array|null|EntityInterface $relatedData): void
@@ -74,29 +68,15 @@ class BelongsManyRelation extends AbstractRelation
         }
     }
 
-    public function remove(int|string|EntityInterface|null $localEntity, string $localAlias): void
+    public function join(BaseBuilder $builder, string $localAlias, string $column = ''): void
     {
-        if (empty($localEntity) or $this->isMorph) {
-            return;
-        }
+        $localTable = $this->registry->getEntityTable($localAlias);
 
-        $localId = $localEntity instanceof EntityInterface ? $this->getLocalId($localEntity) : $localEntity;
-
-        if (empty($localId)) {
-            return;
-        }
-
-        $pivot = $this->registry->getPivotConfig($localAlias, $this->relatedAlias);
-        $this->syncPivot($pivot['table'], $pivot['local_column'], $pivot['foreign_column'], $localId, []);
-    }
-
-    public function join(BaseBuilder $builder, string $localTable, string $localAlias, BaseConnection $db, string $column = ''): void
-    {
         $pivot = $this->registry->getPivotConfig($localAlias, $this->relatedAlias);
 
         if ($this->isMorph) {
             $builder
-                ->join($pivot['table'], "{$pivot['table']}.{$this->morphKey} = {$localTable}.{$this->localKey} AND {$pivot['table']}.{$this->morphTypeKey} = " . $db->escape($localAlias), 'left')
+                ->join($pivot['table'], "{$pivot['table']}.{$this->morphKey} = {$localTable}.{$this->localKey} AND {$pivot['table']}.{$this->morphTypeKey} = '{$localAlias}'", 'left')
                 ->join($this->relatedTable, "{$this->relatedTable}.{$this->relatedKey} = {$pivot['table']}.{$this->foreignKey}", 'left');
         } else {
             $builder
@@ -132,21 +112,15 @@ class BelongsManyRelation extends AbstractRelation
         return $this->relatedModel;
     }
 
-    public function eagerLoad(array $entities, ?\Closure $dynamicConstraint = null): void
+    public function preload(array $entities, ?\Closure $dynamicConstraint = null): void
     {
         if (empty($entities)) {
             return;
         }
 
-        $localIds = [];
+        $localIds = $this->collectIds($entities, $this->localKey);
 
-        foreach ($entities as $entity) {
-            $localIds[] = $entity->getAttribute($this->localKey);
-        }
-
-        $localIds = array_filter(array_unique($localIds));
-
-        if (empty($localIds)) {
+        if (!$localIds) {
             return;
         }
 
@@ -154,9 +128,9 @@ class BelongsManyRelation extends AbstractRelation
         $pivot = $this->registry->getPivotConfig($alias, $this->relatedAlias);
 
         if ($this->isMorph) {
-            $this->eagerLoadPivot($entities, $localIds, $pivot['table'], $this->morphKey, $this->foreignKey, $dynamicConstraint, $alias);
+            $this->preloadPivot($entities, $localIds, $pivot['table'], $this->morphKey, $this->foreignKey, $dynamicConstraint, $alias);
         } else {
-            $this->eagerLoadPivot($entities, $localIds, $pivot['table'], $pivot['local_column'], $pivot['foreign_column'], $dynamicConstraint);
+            $this->preloadPivot($entities, $localIds, $pivot['table'], $pivot['local_column'], $pivot['foreign_column'], $dynamicConstraint);
         }
     }
 
@@ -197,19 +171,7 @@ class BelongsManyRelation extends AbstractRelation
             $constraint($builder);
         }
 
-        try {
-            $rows = $builder->get()->getResultArray();
-        } finally {
-            $this->relatedModel->reset();
-        }
-
-        $map = [];
-
-        foreach ($rows as $row) {
-            $map[(string) $row['__group_key']] = $row[$resultAlias];
-        }
-
-        return $map;
+        return $this->runAggregateQuery($builder, $resultAlias);
     }
 
     public function cascadeDelete(array $localIds, string $localAlias, bool $purge): void
@@ -227,7 +189,7 @@ class BelongsManyRelation extends AbstractRelation
         }
     }
 
-    protected function eagerLoadPivot(array $entities, array $localIds, string $pivotTable, string $pivotLocalCol, string $pivotForeignCol, ?\Closure $dynamicConstraint, string $morphTypeAlias = ''): void
+    protected function preloadPivot(array $entities, array $localIds, string $pivotTable, string $pivotLocalCol, string $pivotForeignCol, ?\Closure $dynamicConstraint, string $morphTypeAlias = ''): void
     {
         $builder = $this->relatedModel->builder();
         $this->relatedModel->handleDeleted();
@@ -241,12 +203,12 @@ class BelongsManyRelation extends AbstractRelation
             $builder->where("{$pivotTable}.{$this->morphTypeKey}", $morphTypeAlias);
         }
 
-        if ($dynamicConstraint) {
-            $dynamicConstraint($builder);
-        }
-
         if ($this->constraint) {
             $this->applyConstraints($builder);
+        }
+
+        if ($dynamicConstraint) {
+            $dynamicConstraint($builder);
         }
 
         $rows = $builder->get()->getResultArray();

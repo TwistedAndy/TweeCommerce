@@ -5,9 +5,8 @@ namespace App\Core\Entity\Relations;
 use App\Core\Entity\EntityException;
 use App\Core\Entity\EntityInterface;
 use App\Core\Entity\EntityModel;
-use App\Core\Entity\EntityRegistry;
 use CodeIgniter\Database\BaseBuilder;
-use CodeIgniter\Database\BaseConnection;
+use App\Core\Entity\EntityRegistry;
 
 class MorphToRelation extends AbstractRelation
 {
@@ -79,7 +78,10 @@ class MorphToRelation extends AbstractRelation
         $relatedId     = $relatedData->getAttribute($relatedPk);
 
         if (empty($relatedId) or $relatedData->hasChanged()) {
-            $this->registry->getModel($relatedAlias)->save($relatedData);
+            if (!$this->registry->getModel($relatedAlias)->save($relatedData)) {
+                return;
+            }
+
             $relatedId = $relatedData->getAttribute($relatedPk);
         }
 
@@ -92,7 +94,7 @@ class MorphToRelation extends AbstractRelation
         throw EntityException::unsupportedType('morph-to', 'aggregate');
     }
 
-    public function join(BaseBuilder $builder, string $localTable, string $localAlias, BaseConnection $db, string $column = ''): void
+    public function join(BaseBuilder $builder, string $localAlias, string $column = ''): void
     {
         throw EntityException::unsupportedType('morph-to', 'join');
     }
@@ -102,8 +104,10 @@ class MorphToRelation extends AbstractRelation
         throw EntityException::unsupportedType('morph-to', 'query');
     }
 
-    public function eagerLoad(array $entities, ?\Closure $dynamicConstraint = null): void
+    public function preload(array $entities, ?\Closure $dynamicConstraint = null): void
     {
+        // $dynamicConstraint cannot be applied here: each morph type requires a separate
+        // findMany() call to a different model, and findMany() does not accept a constraint.
         $grouped = [];
 
         foreach ($entities as $entity) {
@@ -121,10 +125,11 @@ class MorphToRelation extends AbstractRelation
 
         foreach ($grouped as $alias => $entitiesByMorphId) {
             $relatedModel = $this->registry->getModel($alias);
+            $relatedPk    = $this->registry->getEntityFields($alias)->getPrimaryKey();
             $relatedByKey = [];
 
             foreach ($relatedModel->findMany(array_keys($entitiesByMorphId)) as $related) {
-                $relatedByKey[$related->getAttribute($related->getFields()->getPrimaryKey())] = $related;
+                $relatedByKey[$related->getAttribute($relatedPk)] = $related;
             }
 
             foreach ($entitiesByMorphId as $morphId => $parentEntities) {

@@ -6,9 +6,7 @@ use App\Core\Entity\Entity;
 use App\Core\Entity\EntityException;
 use App\Core\Entity\EntityInterface;
 use App\Core\Entity\EntityModel;
-use App\Core\Entity\EntityRegistry;
 use CodeIgniter\Database\BaseBuilder;
-use CodeIgniter\Database\BaseConnection;
 
 /**
  * Handles lazy/eager loading, saving, and cascade-deleting translations for entities with
@@ -18,17 +16,10 @@ use CodeIgniter\Database\BaseConnection;
  */
 class TranslationRelation extends AbstractRelation
 {
-    protected array $configCache = [];
-
-    public function __construct(string $name, array $relation, EntityRegistry $registry)
-    {
-        parent::__construct($name, $relation, $registry);
-    }
-
-    private function resolveConfig(string $alias): array
-    {
-        return $this->configCache[$alias] ??= $this->registry->getConfig($alias)['translation'] ?? [];
-    }
+    protected string $translationTable = '';
+    protected string $entityColumn     = '';
+    protected string $localeColumn     = '';
+    protected string $keyColumn        = '';
 
     public function getType(): string
     {
@@ -47,18 +38,13 @@ class TranslationRelation extends AbstractRelation
      */
     public function get(EntityInterface $entity): array
     {
-        $alias  = $entity->getAlias();
-        $config = $this->resolveConfig($alias);
-        $table  = $config['table'] ?? '';
+        $alias = $entity->getAlias();
 
-        if (empty($table)) {
+        if ($this->translationTable === '' and !$this->initConfig($alias)) {
             return [];
         }
 
-        $entityColumn = $config['entity_column'] ?? 'entity_id';
-        $localeColumn = $config['locale_column'] ?? 'locale';
-        $relatedKey   = $config['key_column'] ?? 'id';
-        $localId      = $this->getLocalId($entity);
+        $localId = $this->getLocalId($entity);
 
         if (empty($localId)) {
             return [];
@@ -66,28 +52,28 @@ class TranslationRelation extends AbstractRelation
 
         $locale  = $entity->getLocale();
         $model   = $this->registry->getModel($alias);
-        $builder = $model->builder($table)->where($entityColumn, $localId);
+        $builder = $model->builder($this->translationTable)->where($this->entityColumn, $localId);
 
         if ($locale !== '') {
-            $builder->where($localeColumn, $locale);
+            $builder->where($this->localeColumn, $locale);
         }
 
-        $rows = $builder->get()->getResultArray();
-
-        [$dataMap, $idMap] = $this->hydrateRows($rows, $localeColumn, $relatedKey, $entity->getFields()->getTranslatable());
-
-        // Embed the translation row ID into each locale's data array so the caller
-        // can store it without needing a separate id map.
+        $rows   = $builder->get()->getResultArray();
         $result = [];
 
-        foreach ($dataMap as $loc => $data) {
-            $result[$loc]                         = $data;
-            $result[$loc][Entity::TRANSLATION_ID] = $idMap[$loc] ?? null;
+        foreach ($rows as $row) {
+            $rowLocale = $row[$this->localeColumn] ?? '';
+
+            if ($rowLocale === '') {
+                continue;
+            }
+
+            $result[$rowLocale] = [Entity::TRANSLATION_ID => $row[$this->keyColumn] ?? null] + $row;
         }
 
         // For a single-locale query always include the locale even on a miss,
         // so the caller knows it was queried and can avoid a re-query.
-        if ($locale !== '' && !isset($result[$locale])) {
+        if ($locale !== '' and !isset($result[$locale])) {
             $result[$locale] = [Entity::TRANSLATION_ID => null];
         }
 
@@ -96,34 +82,29 @@ class TranslationRelation extends AbstractRelation
 
     /**
      * Eager-load translations for a batch of entities in a single query.
+     *
+     * @param EntityInterface[] $entities
+     * @param \Closure|null $dynamicConstraint
      */
-    public function eagerLoad(array $entities, ?\Closure $dynamicConstraint = null): void
+    public function preload(array $entities, ?\Closure $dynamicConstraint = null): void
     {
         if (empty($entities)) {
             return;
         }
 
-        $alias  = $entities[0]->getAlias();
-        $config = $this->resolveConfig($alias);
-        $table  = $config['table'] ?? '';
+        $alias = $entities[0]->getAlias();
 
-        if (empty($table)) {
+        if ($this->translationTable === '' and !$this->initConfig($alias)) {
             return;
         }
 
-        $entityColumn = $config['entity_column'] ?? 'entity_id';
-        $localeColumn = $config['locale_column'] ?? 'locale';
-        $relatedKey   = $config['key_column'] ?? 'id';
-        $translatable = $entities[0]->getFields()->getTranslatable();
-
-        // Single pass: collect IDs and group entities by ID simultaneously
         $entityMap = [];
 
         foreach ($entities as $entity) {
             $localId = $entity->getAttribute($this->localKey);
 
             if ($localId !== null and $localId !== '') {
-                $entityMap[$localId][] = $entity;
+                $entityMap[$localId] = $entity;
             }
         }
 
@@ -132,7 +113,7 @@ class TranslationRelation extends AbstractRelation
         }
 
         $model   = $this->registry->getModel($alias);
-        $builder = $model->builder($table)->whereIn($entityColumn, array_keys($entityMap));
+        $builder = $model->builder($this->translationTable)->whereIn($this->entityColumn, array_keys($entityMap));
 
         if ($dynamicConstraint) {
             $dynamicConstraint($builder);
@@ -140,24 +121,15 @@ class TranslationRelation extends AbstractRelation
 
         $rows = $builder->get()->getResultArray();
 
-        $grouped = [];
-
         foreach ($rows as $row) {
-            $id = $row[$entityColumn] ?? null;
+            $localId   = $row[$this->entityColumn] ?? null;
+            $rowLocale = $row[$this->localeColumn] ?? '';
 
-            if ($id !== null) {
-                $grouped[$id][] = $row;
+            if ($localId === null or $rowLocale === '' or !isset($entityMap[$localId])) {
+                continue;
             }
-        }
 
-        foreach ($entityMap as $localId => $group) {
-            [$dataMap, $idMap] = $this->hydrateRows($grouped[$localId] ?? [], $localeColumn, $relatedKey, $translatable);
-
-            foreach ($group as $entity) {
-                foreach ($dataMap as $locale => $data) {
-                    $entity->setTranslation($locale, $data, $idMap[$locale] ?? null);
-                }
-            }
+            $entityMap[$localId]->setTranslation($rowLocale, $row, $row[$this->keyColumn] ?? null);
         }
     }
 
@@ -172,17 +144,11 @@ class TranslationRelation extends AbstractRelation
             return;
         }
 
-        $alias  = $localEntity->getAlias();
-        $config = $this->resolveConfig($alias);
-        $table  = $config['table'] ?? '';
+        $alias = $localEntity->getAlias();
 
-        if (empty($table)) {
+        if ($this->translationTable === '' and !$this->initConfig($alias)) {
             return;
         }
-
-        $entityColumn = $config['entity_column'] ?? 'entity_id';
-        $localeColumn = $config['locale_column'] ?? 'locale';
-        $primaryKey   = $config['key_column'] ?? 'id';
 
         $translatable = $localEntity->getFields()->getTranslatable();
         $model        = $this->registry->getModel($alias);
@@ -198,9 +164,9 @@ class TranslationRelation extends AbstractRelation
 
             // Explicit locale deletion: setAttribute('title', null) with locale set to 'es'
             if ($values === null) {
-                $model->builder($table)
-                    ->where($entityColumn, $localId)
-                    ->where($localeColumn, $locale)
+                $model->builder($this->translationTable)
+                    ->where($this->entityColumn, $localId)
+                    ->where($this->localeColumn, $locale)
                     ->delete();
                 continue;
             }
@@ -210,45 +176,75 @@ class TranslationRelation extends AbstractRelation
             }
 
             $row = [
-                $entityColumn => $localId,
-                $localeColumn => $locale,
-            ];
-
-            foreach ($translatable as $field => $flag) {
-                if (array_key_exists($field, $values)) {
-                    $row[$field] = $values[$field];
-                }
-            }
+                    $this->entityColumn => $localId,
+                    $this->localeColumn => $locale,
+                ] + array_intersect_key($values, $translatable);
 
             $translationId = $localEntity->getTranslationId($locale);
 
             if ($translationId) {
-                $model->builder($table)
-                    ->where($primaryKey, $translationId)
+                $model->builder($this->translationTable)
+                    ->where($this->keyColumn, $translationId)
                     ->update($row);
             } else {
-                $model->builder($table)->insert($row);
+                $model->builder($this->translationTable)->insert($row);
 
                 $newIds[$locale] = $model->getInsertID();
             }
         }
 
         // Inject newly generated row IDs back so subsequent saves use UPDATE, not INSERT.
+        // Merge the delta onto the full existing translation to avoid losing unchanged fields.
         if ($newIds) {
             foreach ($newIds as $locale => $newId) {
-                $values = $relatedData[$locale];
+                $merged = array_merge($localEntity->getTranslation($locale) ?? [], array_intersect_key($relatedData[$locale], $translatable));
 
-                $stored = [];
-
-                foreach ($translatable as $field => $flag) {
-                    if (array_key_exists($field, $values)) {
-                        $stored[$field] = $values[$field];
-                    }
-                }
-
-                $localEntity->setTranslation($locale, $stored, $newId);
+                $merged[Entity::TRANSLATION_ID] = $newId;
+                $localEntity->setTranslation($locale, $merged);
             }
         }
+    }
+
+    public function resolve(int|string|array|EntityInterface|null $value): EntityInterface|array|null
+    {
+        return is_array($value) ? $value : [];
+    }
+
+    public function query(EntityInterface $localEntity): EntityModel
+    {
+        $alias = $localEntity->getAlias();
+
+        if ($this->translationTable === '' and !$this->initConfig($alias)) {
+            throw EntityException::unsupportedType('translation', 'query');
+        }
+
+        $model   = $this->registry->getModel($alias);
+        $builder = $model->builder($this->translationTable);
+        $builder->where($this->entityColumn, $this->getLocalId($localEntity));
+
+        return $model;
+    }
+
+    public function join(BaseBuilder $builder, string $localAlias, string $column = ''): void
+    {
+        if ($this->translationTable === '' and !$this->initConfig($localAlias)) {
+            return;
+        }
+
+        $localTable = $this->registry->getEntityTable($localAlias);
+
+        $alias = "t_{$this->relationName}_{$column}";
+
+        $builder->join(
+            "{$this->translationTable} {$alias}",
+            "{$alias}.{$this->entityColumn} = {$localTable}.{$this->localKey} AND {$alias}.{$this->localeColumn} = '{$column}'",
+            'left'
+        );
+    }
+
+    public function aggregate(array $lookupIds, string $expression, string $resultAlias, string $localAlias, ?\Closure $constraint): array
+    {
+        throw EntityException::unsupportedType('translation', 'aggregate');
     }
 
     /**
@@ -260,73 +256,32 @@ class TranslationRelation extends AbstractRelation
             return;
         }
 
-        $config = $this->resolveConfig($localAlias);
-        $table  = $config['table'] ?? '';
-
-        if (empty($table)) {
+        if ($this->translationTable === '' and !$this->initConfig($localAlias)) {
             return;
         }
 
-        $entityColumn = $config['entity_column'] ?? 'entity_id';
-
-        $model = $this->registry->getModel($localAlias);
-
-        $model->builder($table)
-            ->whereIn($entityColumn, $localIds)
+        $this->registry->getModel($localAlias)
+            ->builder($this->translationTable)
+            ->whereIn($this->entityColumn, $localIds)
             ->delete();
     }
 
-    public function resolve(int|string|array|EntityInterface|null $value): EntityInterface|array|null
-    {
-        return is_array($value) ? $value : [];
-    }
-
-    public function join(BaseBuilder $builder, string $localTable, string $localAlias, BaseConnection $db, string $column = ''): void
-    {
-        throw EntityException::unsupportedType('translation', 'join');
-    }
-
-    public function query(EntityInterface $localEntity): EntityModel
-    {
-        throw EntityException::unsupportedType('translation', 'query');
-    }
-
     /**
-     * Convert raw DB rows into a field data map and a separate ID map.
-     *
-     * @param array[] $rows
-     * @param string $localeColumn Column holding the locale code
-     * @param string $relatedKey   Primary key column of the translation table
-     * @param array $translatable  Translatable field names from EntityFields::getTranslatable()
-     *
-     * @return array{0: array<string, array<string, mixed>>, 1: array<string, int|string|null>}
-     *         [locale => fieldData, ...], [locale => rowId, ...]
+     * Initialize the entity config
      */
-    protected function hydrateRows(array $rows, string $localeColumn, string $relatedKey, array $translatable): array
+    protected function initConfig(string $alias): bool
     {
-        $dataMap = [];
-        $idsMap  = [];
+        $config = $this->registry->getConfig($alias)['translation'] ?? [];
 
-        foreach ($rows as $row) {
-            $locale = $row[$localeColumn] ?? '';
-
-            if ($locale === '') {
-                continue;
-            }
-
-            $idsMap[$locale] = $row[$relatedKey] ?? null;
-
-            $fields = [];
-
-            foreach ($translatable as $field => $flag) {
-                if (array_key_exists($field, $row)) {
-                    $fields[$field] = $row[$field];
-                }
-            }
-
-            $dataMap[$locale] = $fields;
+        if (empty($config['table'])) {
+            return false;
         }
 
-        return [$dataMap, $idsMap];
+        $this->translationTable = $config['table'];
+        $this->entityColumn     = $config['entity_column'] ?? 'entity_id';
+        $this->localeColumn     = $config['locale_column'] ?? 'locale';
+        $this->keyColumn        = $config['key_column'] ?? 'id';
+
+        return true;
     }
 }

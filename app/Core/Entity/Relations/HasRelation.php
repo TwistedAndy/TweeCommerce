@@ -6,7 +6,6 @@ use App\Core\Entity\EntityInterface;
 use App\Core\Entity\EntityModel;
 use App\Core\Entity\EntityRegistry;
 use CodeIgniter\Database\BaseBuilder;
-use CodeIgniter\Database\BaseConnection;
 
 class HasRelation extends AbstractRelation
 {
@@ -14,21 +13,11 @@ class HasRelation extends AbstractRelation
     {
         parent::__construct($name, $relation, $registry);
         $this->isMultiple = ($relation['type'] === 'has-many');
-        $this->initRelation($relation['entity']);
     }
 
     public function getType(): string
     {
         return $this->isMultiple ? 'has-many' : 'has-one';
-    }
-
-    public function get(EntityInterface $entity): EntityInterface|array|null
-    {
-        if (!$this->getLocalId($entity)) {
-            return $this->isMultiple ? [] : null;
-        }
-
-        return $this->isMultiple ? $this->query($entity)->findAll() : $this->query($entity)->first();
     }
 
     public function update(EntityInterface $localEntity, array|null|EntityInterface $relatedData): void
@@ -40,14 +29,15 @@ class HasRelation extends AbstractRelation
         }
 
         if ($this->isMultiple) {
-            $this->updateHasMany($localId, $relatedData);
+            $this->updateMany($localId, $relatedData);
         } else {
-            $this->updateHasOne($localId, $relatedData);
+            $this->updateOne($localId, $relatedData);
         }
     }
 
-    public function join(BaseBuilder $builder, string $localTable, string $localAlias, BaseConnection $db, string $column = ''): void
+    public function join(BaseBuilder $builder, string $localAlias, string $column = ''): void
     {
+        $localTable = $this->registry->getEntityTable($localAlias);
         $builder->join($this->relatedTable, "{$this->relatedTable}.{$this->foreignKey} = {$localTable}.{$this->localKey}", 'left');
     }
 
@@ -63,21 +53,11 @@ class HasRelation extends AbstractRelation
         return $this->relatedModel;
     }
 
-    public function eagerLoad(array $entities, ?\Closure $dynamicConstraint = null): void
+    public function preload(array $entities, ?\Closure $dynamicConstraint = null): void
     {
-        if (empty($entities)) {
-            return;
-        }
+        $localIds = $this->collectIds($entities, $this->localKey);
 
-        $localIds = [];
-
-        foreach ($entities as $entity) {
-            $localIds[] = $entity->getAttribute($this->localKey);
-        }
-
-        $localIds = array_filter(array_unique($localIds));
-
-        if (empty($localIds)) {
+        if (!$localIds) {
             return;
         }
 
@@ -92,51 +72,17 @@ class HasRelation extends AbstractRelation
             $dynamicConstraint($builder);
         }
 
-        $relatedRecords = $builder->whereIn($this->foreignKey, $localIds)->get()->getResultArray();
+        $rows = $builder->whereIn($this->foreignKey, $localIds)->get()->getResultArray();
         $this->relatedModel->reset();
 
         $relatedByKey = [];
 
-        foreach ($relatedRecords as $row) {
+        foreach ($rows as $row) {
             $key                  = (string) $row[$this->foreignKey];
             $relatedByKey[$key][] = $this->relatedModel->hydrateRow($row);
         }
 
-        $empty = $this->isMultiple ? [] : null;
-
-        foreach ($entities as $parentEntity) {
-            $parentId = (string) $this->getLocalId($parentEntity);
-
-            if (empty($parentId)) {
-                $parentEntity->setAttribute($this->relationName, $empty);
-                $parentEntity->flushChanges();
-                continue;
-            }
-
-            $matched = $relatedByKey[$parentId] ?? [];
-            $parentEntity->setAttribute($this->relationName, $this->isMultiple ? $matched : ($matched[0] ?? null));
-            $parentEntity->flushChanges();
-        }
-    }
-
-    public function cascadeDelete(array $localIds, string $localAlias, bool $purge): void
-    {
-        if (!$this->cascade or empty($localIds)) {
-            return;
-        }
-
-        $rows = $this->relatedModel->builder()
-            ->select($this->relatedKey)
-            ->whereIn($this->foreignKey, $localIds)
-            ->get()->getResultArray();
-
-        $this->relatedModel->reset();
-
-        $ids = array_column($rows, $this->relatedKey);
-
-        if (!empty($ids)) {
-            $this->relatedModel->delete($ids, $purge);
-        }
+        $this->assignFromMap($entities, $relatedByKey, $this->localKey);
     }
 
     /**
@@ -161,24 +107,12 @@ class HasRelation extends AbstractRelation
             $constraint($builder);
         }
 
-        try {
-            $rows = $builder->get()->getResultArray();
-        } finally {
-            $this->relatedModel->reset();
-        }
-
-        $map = [];
-
-        foreach ($rows as $row) {
-            $map[(string) $row['__group_key']] = $row[$resultAlias];
-        }
-
-        return $map;
+        return $this->runAggregateQuery($builder, $resultAlias);
     }
 
-    public function cascadeRestore(array $localIds, string $localAlias = ''): void
+    public function cascadeDelete(array $localIds, string $localAlias, bool $purge): void
     {
-        if (!$this->cascade or empty($localIds)) {
+        if (!$this->cascade or !$localIds) {
             return;
         }
 
@@ -191,18 +125,41 @@ class HasRelation extends AbstractRelation
 
         $ids = array_column($rows, $this->relatedKey);
 
-        if (!empty($ids)) {
+        if ($ids) {
+            $this->relatedModel->delete($ids, $purge);
+        }
+    }
+
+    public function cascadeRestore(array $localIds, string $localAlias = ''): void
+    {
+        if (!$this->cascade or !$localIds) {
+            return;
+        }
+
+        $rows = $this->relatedModel->builder()
+            ->select($this->relatedKey)
+            ->whereIn($this->foreignKey, $localIds)
+            ->get()->getResultArray();
+
+        $this->relatedModel->reset();
+
+        $ids = array_column($rows, $this->relatedKey);
+
+        if ($ids) {
             $this->relatedModel->restore($ids);
         }
     }
 
-    private function updateHasOne(int|string $localId, array|null|EntityInterface $relatedData): void
+    protected function updateOne(int|string $localId, array|null|EntityInterface $relatedData): void
     {
         $entity = $this->resolveOne($relatedData);
 
         if ($entity instanceof EntityInterface) {
             $entity->setAttribute($this->foreignKey, $localId);
-            $this->relatedModel->save($entity);
+
+            if (!$this->relatedModel->save($entity)) {
+                return;
+            }
 
             $entityId   = $entity->getAttribute($this->relatedKey);
             $excludeIds = empty($entityId) ? [] : [$entityId];
@@ -213,7 +170,7 @@ class HasRelation extends AbstractRelation
         }
     }
 
-    private function updateHasMany(int|string $localId, array|null|EntityInterface $relatedData): void
+    protected function updateMany(int|string $localId, array|null|EntityInterface $relatedData): void
     {
         if (empty($relatedData)) {
             $this->detachOrphans($this->foreignKey, $localId);

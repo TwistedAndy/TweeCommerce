@@ -289,7 +289,7 @@ trait ModelRelations
         }
 
         foreach ($relations as $key => $constraint) {
-            $this->fields->getRelation($key)->eagerLoad($entities, $constraint);
+            $this->fields->getRelation($key)->preload($entities, $constraint);
         }
     }
 

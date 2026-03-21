@@ -1622,11 +1622,10 @@ trait QueryBuilder
         }
 
         $relation = $this->fields->getRelation($key);
-        $cacheKey = $relation->getType() === 'meta' ? "{$key}:{$column}" : $key;
 
-        if (!isset($this->joinedRelations[$cacheKey])) {
-            $relation->join($this->builder, $this->table, $this->alias, $this->db, $column);
-            $this->joinedRelations[$cacheKey] = true;
+        if (!isset($this->joinedRelations["{$key}:{$column}"])) {
+            $relation->join($this->builder, $this->alias, $column);
+            $this->joinedRelations["{$key}:{$column}"] = true;
         }
 
         return $relation;

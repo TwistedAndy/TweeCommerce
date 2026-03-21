@@ -7,15 +7,19 @@ use App\Core\Entity\EntityInterface;
 use App\Core\Entity\EntityModel;
 use App\Core\Entity\EntityRegistry;
 use CodeIgniter\Database\BaseBuilder;
-use CodeIgniter\Database\BaseConnection;
 
 class MetaRelation extends AbstractRelation
 {
+    protected string $keyColumn    = 'meta_key';
+    protected string $valueColumn  = 'meta_value';
+    protected string $entityColumn = 'entity_id';
+
     public function __construct(string $name, array $relation, EntityRegistry $registry)
     {
         parent::__construct($name, $relation, $registry);
-        $this->isMultiple = false;
-        $this->initRelation($relation['entity']);
+        $this->keyColumn    = $this->relatedConfig['key_column'] ?? 'meta_key';
+        $this->valueColumn  = $this->relatedConfig['value_column'] ?? 'meta_value';
+        $this->entityColumn = $this->relatedConfig['entity_column'] ?? 'entity_id';
     }
 
     public function getType(): string
@@ -45,18 +49,11 @@ class MetaRelation extends AbstractRelation
             $localEntity->setAttribute($this->relationName, $meta);
         }
 
-        $metaKeyColumn   = $this->relatedConfig['key_column'] ?? 'meta_key';
-        $metaValueColumn = $this->relatedConfig['value_column'] ?? 'meta_value';
-
         $meta->setAttribute($this->relatedKey, $localId);
 
         if (is_array($relatedData)) {
             foreach ($relatedData as $key => $value) {
-                if (is_array($value) and isset($value[$metaKeyColumn])) {
-                    $meta->setAttribute($value[$metaKeyColumn], $value[$metaValueColumn] ?? null);
-                } else {
-                    $meta->setAttribute($key, $value);
-                }
+                $meta->setAttribute($key, $value);
             }
         } elseif ($relatedData instanceof EntityInterface and $relatedData !== $meta) {
             $meta->setAttributes($relatedData->getChanges());
@@ -70,15 +67,14 @@ class MetaRelation extends AbstractRelation
         throw EntityException::unsupportedType('meta', 'aggregate');
     }
 
-    public function join(BaseBuilder $builder, string $localTable, string $localAlias, BaseConnection $db, string $column = ''): void
+    public function join(BaseBuilder $builder, string $localAlias, string $column = ''): void
     {
-        $entityColumn = $this->relatedConfig['entity_column'] ?? 'entity_id';
-        $keyColumn    = $this->relatedConfig['key_column'] ?? 'meta_key';
-        $alias        = "m_{$this->relationName}_{$column}";
+        $localTable = $this->registry->getEntityTable($localAlias);
+        $alias      = "m_{$this->relationName}_{$column}";
 
         $builder->join(
             "{$this->relatedTable} {$alias}",
-            "{$alias}.{$entityColumn} = {$localTable}.{$this->localKey} AND {$alias}.{$keyColumn} = " . $db->escape($column),
+            "{$alias}.{$this->entityColumn} = {$localTable}.{$this->localKey} AND {$alias}.{$this->keyColumn} = '{$column}'",
             'left'
         );
     }
@@ -86,7 +82,7 @@ class MetaRelation extends AbstractRelation
     public function query(EntityInterface $localEntity): EntityModel
     {
         $builder = $this->relatedModel->builder();
-        $builder->where($this->relatedConfig['entity_column'] ?? 'entity_id', $this->getLocalId($localEntity));
+        $builder->where($this->entityColumn, $this->getLocalId($localEntity));
 
         if ($this->constraint) {
             $this->applyConstraints($builder);
@@ -95,21 +91,15 @@ class MetaRelation extends AbstractRelation
         return $this->relatedModel;
     }
 
-    public function eagerLoad(array $entities, ?\Closure $dynamicConstraint = null): void
+    public function preload(array $entities, ?\Closure $dynamicConstraint = null): void
     {
         if (empty($entities)) {
             return;
         }
 
-        $localIds = [];
+        $localIds = $this->collectIds($entities, $this->localKey);
 
-        foreach ($entities as $entity) {
-            $localIds[] = $entity->getAttribute($this->localKey);
-        }
-
-        $localIds = array_filter(array_unique($localIds));
-
-        if (empty($localIds)) {
+        if (!$localIds) {
             return;
         }
 

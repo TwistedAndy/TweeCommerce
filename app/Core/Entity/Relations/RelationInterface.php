@@ -5,7 +5,6 @@ namespace App\Core\Entity\Relations;
 use App\Core\Entity\EntityInterface;
 use App\Core\Entity\EntityModel;
 use CodeIgniter\Database\BaseBuilder;
-use CodeIgniter\Database\BaseConnection;
 
 interface RelationInterface
 {
@@ -26,21 +25,15 @@ interface RelationInterface
     public function update(EntityInterface $localEntity, array|null|EntityInterface $relatedData): void;
 
     /**
-     * Remove/Detach the relationship entirely
-     */
-    public function remove(int|string|EntityInterface|null $localEntity, string $localAlias): void;
-
-    /**
      * Resolve a value into a singular entity or an array with entities
      */
     public function resolve(int|string|array|EntityInterface|null $value): EntityInterface|array|null;
-
 
     /**
      * Apply the appropriate LEFT JOIN(s) for this relation to the given builder.
      * This is the JOIN-time counterpart of query(), which builds WHERE clauses for lazy loading.
      */
-    public function join(BaseBuilder $builder, string $localTable, string $localAlias, BaseConnection $db, string $column = ''): void;
+    public function join(BaseBuilder $builder, string $localAlias, string $column = ''): void;
 
     /**
      * Get a configured Model Instance proxying the Builder for this relation.
@@ -54,7 +47,7 @@ interface RelationInterface
     /**
      * Fill entities with the relation data
      */
-    public function eagerLoad(array $entities, ?\Closure $dynamicConstraint = null): void;
+    public function preload(array $entities, ?\Closure $dynamicConstraint = null): void;
 
     /**
      * Run an aggregate query for the given parent-side IDs.
